@@ -5,6 +5,7 @@ import {
   cumulativeSavingsOverYears,
   fullFinancialSnapshot,
   netPresentValue,
+  peakCapacitySavingsFromPeakDelta,
   PROSUMENT_EUR_PER_KWP_YEAR,
   simplePaybackYears,
   totalSystemCostEur,
@@ -97,6 +98,35 @@ describe('breakevenYear', () => {
   it('finds first year cumulative meets cost', () => {
     const yearly = [100, 200, 300, 400]
     expect(breakevenYear(yearly, 350)).toBe(3)
+  })
+})
+
+describe('peakCapacitySavingsFromPeakDelta', () => {
+  it('returns tariff times peak delta when simulated peak is lower', () => {
+    expect(
+      peakCapacitySavingsFromPeakDelta({
+        capacityTariffEurPerKwYear: 40,
+        maxBaselinePeakKw: 6,
+        maxSimulatedPeakKw: 4,
+      }),
+    ).toBe(80)
+  })
+
+  it('returns 0 when tariff is 0 or simulated peak is not lower', () => {
+    expect(
+      peakCapacitySavingsFromPeakDelta({
+        capacityTariffEurPerKwYear: 0,
+        maxBaselinePeakKw: 6,
+        maxSimulatedPeakKw: 4,
+      }),
+    ).toBe(0)
+    expect(
+      peakCapacitySavingsFromPeakDelta({
+        capacityTariffEurPerKwYear: 40,
+        maxBaselinePeakKw: 3,
+        maxSimulatedPeakKw: 5,
+      }),
+    ).toBe(0)
   })
 })
 

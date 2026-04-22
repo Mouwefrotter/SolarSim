@@ -6,6 +6,7 @@ import {
   parsePeakPowerCsv,
 } from '../utils/peakPowerCsv'
 import { PeakPowerMonthlyChart } from './PeakPowerMonthlyChart'
+import { SliderInput } from './SliderInput'
 
 function clampYear(choice: number | null, years: number[]): number | null {
   if (years.length === 0) {
@@ -21,8 +22,10 @@ export function PeakPowerCsvUpload({ dark }: { dark: boolean }) {
   const {
     peakPowerKwByMonth,
     peakPowerSelectedYear,
+    capacityTariffEurPerKwYear,
     setPeakPowerCsv,
     setPeakPowerYear,
+    setCapacityTariffEurPerKwYear,
     clearPeakPowerCsv,
   } = useCalculatorStore()
 
@@ -82,7 +85,7 @@ export function PeakPowerCsvUpload({ dark }: { dark: boolean }) {
     <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-700 dark:bg-slate-800/50">
       <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Piekvermogen</h3>
 
-      <div className="mt-3 flex flex-wrap items-center gap-3">
+      <div className="mt-2 flex flex-wrap items-center gap-3">
         <input
           ref={fileInputRef}
           id={fileId}
@@ -133,6 +136,19 @@ export function PeakPowerCsvUpload({ dark }: { dark: boolean }) {
           <PeakPowerMonthlyChart monthlyPeakKw={monthlySeries} dark={dark} />
         </div>
       ) : null}
+
+      <div className="mt-4 border-t border-slate-200 pt-4 dark:border-slate-600">
+        <SliderInput
+          id="cap-tariff"
+          label="Capaciteitstarief (afnamepiek)"
+          min={0}
+          max={200}
+          step={0.5}
+          value={capacityTariffEurPerKwYear}
+          onChange={setCapacityTariffEurPerKwYear}
+          suffix="€/kW/jaar"
+        />
+      </div>
 
       {error ? (
         <p className="mt-2 text-sm text-red-600 dark:text-red-400" role="alert">

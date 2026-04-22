@@ -78,11 +78,30 @@ export function parseUploadedPvgisFile(text: string): ParsedPVGIS {
     }
     return parsePvgisJsonDocument(json)
   }
-  if (/g\s*\(\s*h\s*\)/i.test(text) && /time/i.test(text)) {
+  if (/g\s*\(\s*[hi]\s*\)/i.test(text) && /time/i.test(text)) {
     return parsePvgisTmyCsv(text)
+  }
+  if (isLikelyFluviusConsumptionCsv(text)) {
+    throw new Error(
+      'Dit is een Fluvius-verbruiksexport (elektriciteit, kwartier- of dagtotalen), geen PVGIS. Upload het bij «Verbruik (Fluvius)» in deze app, niet hier. Voor zonne-elektriciteit: op PVGIS JSON van PVcalc of een PVGIS TMY-CSV, of laat de app PVGIS per locatie ophalen.',
+    )
   }
   throw new Error(
     'Onbekend formaat: gebruik PVGIS JSON (PVcalc, TMY of hourly/seriescalc) of een PVGIS TMY-CSV-export.',
+  )
+}
+
+/** Fluvius «Verbruikshistoriek» / meetdata — niet verwarren met PVGIS. */
+function isLikelyFluviusConsumptionCsv(text: string): boolean {
+  const head = text.slice(0, 12000).toLowerCase()
+  if (!head.includes('van (datum)')) {
+    return false
+  }
+  if (head.includes('verbruikshistoriek') || head.includes('ean-code')) {
+    return true
+  }
+  return (
+    /afname|injectie|productie|teruglevering/i.test(text.slice(0, 12000)) && /register/.test(head)
   )
 }
 

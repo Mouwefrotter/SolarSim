@@ -1,4 +1,4 @@
-import { useMemo, useCallback } from 'react'
+import { useMemo, useCallback, useState } from 'react'
 import { useCalculatorStore } from '../store/calculatorStore'
 import { usePVGIS } from '../hooks/usePVGIS'
 import { SliderInput } from './SliderInput'
@@ -6,7 +6,8 @@ import { MetricCard } from './MetricCard'
 import { MonthlyChart } from './MonthlyChart'
 import { DayHourlyChart } from './DayHourlyChart'
 import { SavingsChart } from './SavingsChart'
-import { LocationSearch } from './LocationSearch'
+import { PvgisDataControls } from './PvgisDataControls'
+import { SolarSimTourDialog } from './SolarSimTourDialog'
 import { PVGISManualInput } from './PVGISManualInput'
 import { ConsumptionCsvUpload } from './ConsumptionCsvUpload'
 import { PeakPowerCsvUpload } from './PeakPowerCsvUpload'
@@ -17,13 +18,20 @@ import {
   monthlyProductionKwh,
   rowsToAnnualTotals,
 } from '../utils/solarCalc'
-import { computeMonthlyEnergyRowsFromHourlyProfile } from '../utils/hourlySelfConsumption'
+import { BATTERY_PRESETS } from '../data/batteryPresets'
+import {
+  computeMonthlyEnergyRowsFromHourlyProfile,
+  computeMonthlyPeakImportKwFromHourlyProfile,
+} from '../utils/hourlySelfConsumption'
+import { yearByMonthForTwoYearSplit } from '../utils/csvConsumption'
+import { monthlyPeakKwForYear } from '../utils/peakPowerCsv'
 import { monthlyConsumptionKwh, estimatedEvenMonthly } from '../utils/consumptionProfile'
 import {
   breakevenYear,
   cumulativeSavingsOverYears,
   fullFinancialSnapshot,
   npv25YearDefault,
+  peakCapacitySavingsFromPeakDelta,
   totalSystemCostEur,
   yearlySavingsSeries,
 } from '../utils/financialCalc'
@@ -39,9 +47,19 @@ function fallbackPvgis(): ParsedPVGIS {
 
 export function Calculator({ dark }: { dark: boolean }) {
   const s = useCalculatorStore()
-  const pvgisQuery = usePVGIS(s.lat, s.lon, s.roofTiltDeg, {
-    fetchEnabled: s.pvgisManual === null,
-  })
+  const pvgisQuery = usePVGIS(
+    {
+      lat: s.lat,
+      lon: s.lon,
+      tiltDeg: s.roofTiltDeg,
+      aspectDeg: s.pvgisPanelAzimuthDeg,
+      systemLossPct: s.pvgisSystemLossPct,
+      pvtech: s.pvgisPvtechChoice,
+    },
+    {
+      fetchEnabled: s.pvgisManual === null && s.pvgisProductionLoaded,
+    },
+  )
 
   const parsed: ParsedPVGIS = s.pvgisManual ?? pvgisQuery.data ?? fallbackPvgis()
   const systemKwp = computeSystemKwp(s.roofAreaM2, s.panelEfficiencyPct)
@@ -86,7 +104,70 @@ export function Calculator({ dark }: { dark: boolean }) {
     [s.annualConsumptionKwh],
   )
 
-  const { rows, hourlySelfOverlapModel } = useMemo(() => {
+  const batteryParams = useMemo(
+    () => ({
+      minSocFrac: s.batteryMinSocFrac,
+      chargeEfficiency: s.batteryChargeEff,
+      dischargeEfficiency: s.batteryDischargeEff,
+      maxPowerKw: s.batteryMaxPowerKw,
+    }),
+    [
+      s.batteryMinSocFrac,
+      s.batteryChargeEff,
+      s.batteryDischargeEff,
+      s.batteryMaxPowerKw,
+    ],
+  )
+
+  const batteryUsableKwh = useMemo(
+    () => Math.max(0, s.batteryKwh * (1 - s.batteryMinSocFrac)),
+    [s.batteryKwh, s.batteryMinSocFrac],
+  )
+
+  const batteryRoundtripEff = useMemo(
+    () => s.batteryChargeEff * s.batteryDischargeEff,
+    [s.batteryChargeEff, s.batteryDischargeEff],
+  )
+
+  const consumptionYearByMonth = useMemo((): number[] | null => {
+    if (
+      !s.consumptionCsvUseMixedYears ||
+      s.consumptionCsvYearSecondary == null ||
+      s.consumptionCsvSelectedYear == null
+    ) {
+      return null
+    }
+    return yearByMonthForTwoYearSplit(
+      s.consumptionCsvSelectedYear,
+      s.consumptionCsvYearSecondary,
+      s.consumptionCsvMixedFirstMonthSecondary,
+    )
+  }, [
+    s.consumptionCsvUseMixedYears,
+    s.consumptionCsvYearSecondary,
+    s.consumptionCsvSelectedYear,
+    s.consumptionCsvMixedFirstMonthSecondary,
+  ])
+
+  const consumptionPeakYearMatches = useMemo(() => {
+    if (s.consumptionCsvSelectedYear == null || s.peakPowerSelectedYear == null) {
+      return false
+    }
+    if (s.consumptionCsvUseMixedYears && s.consumptionCsvYearSecondary != null) {
+      return (
+        s.peakPowerSelectedYear === s.consumptionCsvSelectedYear ||
+        s.peakPowerSelectedYear === s.consumptionCsvYearSecondary
+      )
+    }
+    return s.consumptionCsvSelectedYear === s.peakPowerSelectedYear
+  }, [
+    s.consumptionCsvSelectedYear,
+    s.consumptionCsvUseMixedYears,
+    s.consumptionCsvYearSecondary,
+    s.peakPowerSelectedYear,
+  ])
+
+  const { rows, hourlySelfOverlapModel, selfConsumedNoBatteryMonthly } = useMemo(() => {
     const range = s.consumptionCsvDateRange
     const yr = s.consumptionCsvSelectedYear
     const dh = s.consumptionCsvDailyHourly
@@ -96,31 +177,60 @@ export function Calculator({ dark }: { dark: boolean }) {
       yr != null &&
       s.consumptionCsvFluviusGranularity === 'kwartier'
     ) {
-      const fromHourly = computeMonthlyEnergyRowsFromHourlyProfile({
+      const hourlyBase = {
         monthlyProductionKwh: productionMonthly,
         monthlyConsumptionKwh: consumptionProfile,
         dailyHourly: dh,
         year: yr,
+        yearByMonth: consumptionYearByMonth,
         fileMin: range.min,
         fileMax: range.max,
         latDeg: s.lat,
-        selfConsumptionRate: selfRate,
         pvgisTmyGhiDailyHourly: s.pvgisManual?.tmyGhiDailyHourly ?? null,
         pvgisTmyRange: s.pvgisManual?.tmyRange ?? null,
         pvgisTmyDataYear: s.pvgisManual?.tmyDataYear ?? null,
         pvgisTmyMultiYear: s.pvgisManual?.tmyMultiYear ?? false,
+      } as const
+
+      const fromHourly = computeMonthlyEnergyRowsFromHourlyProfile({
+        ...hourlyBase,
+        selfConsumptionRate: selfRate,
+        batteryEnabled: s.batteryEnabled,
+        batteryKwh: s.batteryKwh,
+        batteryParams: s.batteryEnabled ? batteryParams : undefined,
       })
       if (fromHourly) {
-        return { rows: fromHourly, hourlySelfOverlapModel: true as const }
+        let noBatt: number[] | null = null
+        if (s.batteryEnabled) {
+          const withoutBatt = computeMonthlyEnergyRowsFromHourlyProfile({
+            ...hourlyBase,
+            selfConsumptionRate: 0.7,
+            batteryEnabled: false,
+            batteryParams: undefined,
+          })
+          if (withoutBatt) {
+            noBatt = withoutBatt.map((r) => r.selfConsumedKwh)
+          }
+        }
+        return { rows: fromHourly, hourlySelfOverlapModel: true as const, selfConsumedNoBatteryMonthly: noBatt }
       }
     }
+    const simpleRows = computeMonthlyEnergyRows({
+      monthlyProductionKwh: productionMonthly,
+      monthlyConsumptionKwh: consumptionProfile,
+      selfConsumptionRate: selfRate,
+    })
+    const noBatt = s.batteryEnabled
+      ? computeMonthlyEnergyRows({
+          monthlyProductionKwh: productionMonthly,
+          monthlyConsumptionKwh: consumptionProfile,
+          selfConsumptionRate: 0.7,
+        }).map((r) => r.selfConsumedKwh)
+      : null
     return {
-      rows: computeMonthlyEnergyRows({
-        monthlyProductionKwh: productionMonthly,
-        monthlyConsumptionKwh: consumptionProfile,
-        selfConsumptionRate: selfRate,
-      }),
+      rows: simpleRows,
       hourlySelfOverlapModel: false as const,
+      selfConsumedNoBatteryMonthly: noBatt,
     }
   }, [
     productionMonthly,
@@ -132,6 +242,76 @@ export function Calculator({ dark }: { dark: boolean }) {
     s.consumptionCsvFluviusGranularity,
     s.lat,
     s.pvgisManual,
+    s.batteryEnabled,
+    s.batteryKwh,
+    batteryParams,
+    consumptionYearByMonth,
+  ])
+
+  const peakCapacitySavingsEurAnnual = useMemo(() => {
+    if (
+      s.capacityTariffEurPerKwYear <= 0 ||
+      !s.peakPowerKwByMonth ||
+      s.peakPowerSelectedYear == null ||
+      !hourlySelfOverlapModel ||
+      s.consumptionCsvFluviusGranularity !== 'kwartier' ||
+      !s.consumptionCsvDailyHourly ||
+      !s.consumptionCsvDateRange ||
+      s.consumptionCsvSelectedYear == null ||
+      !consumptionPeakYearMatches
+    ) {
+      return 0
+    }
+    const monthlySim = computeMonthlyPeakImportKwFromHourlyProfile({
+      monthlyProductionKwh: productionMonthly,
+      monthlyConsumptionKwh: consumptionProfile,
+      dailyHourly: s.consumptionCsvDailyHourly,
+      year: s.consumptionCsvSelectedYear,
+      yearByMonth: consumptionYearByMonth,
+      fileMin: s.consumptionCsvDateRange.min,
+      fileMax: s.consumptionCsvDateRange.max,
+      latDeg: s.lat,
+      pvgisTmyGhiDailyHourly: s.pvgisManual?.tmyGhiDailyHourly ?? null,
+      pvgisTmyRange: s.pvgisManual?.tmyRange ?? null,
+      pvgisTmyDataYear: s.pvgisManual?.tmyDataYear ?? null,
+      pvgisTmyMultiYear: s.pvgisManual?.tmyMultiYear ?? false,
+      batteryEnabled: s.batteryEnabled,
+      batteryKwh: s.batteryKwh,
+      batteryParams: s.batteryEnabled ? batteryParams : undefined,
+    })
+    if (!monthlySim || monthlySim.length !== 12) {
+      return 0
+    }
+    const baselineArr = monthlyPeakKwForYear(s.peakPowerKwByMonth, s.peakPowerSelectedYear)
+    const defined = baselineArr.filter((x): x is number => x != null && Number.isFinite(x))
+    if (defined.length === 0) {
+      return 0
+    }
+    const maxBase = Math.max(...defined)
+    const maxSim = Math.max(...monthlySim)
+    return peakCapacitySavingsFromPeakDelta({
+      capacityTariffEurPerKwYear: s.capacityTariffEurPerKwYear,
+      maxBaselinePeakKw: maxBase,
+      maxSimulatedPeakKw: maxSim,
+    })
+  }, [
+    s.capacityTariffEurPerKwYear,
+    s.peakPowerKwByMonth,
+    s.peakPowerSelectedYear,
+    s.consumptionCsvFluviusGranularity,
+    s.consumptionCsvDailyHourly,
+    s.consumptionCsvDateRange,
+    s.consumptionCsvSelectedYear,
+    hourlySelfOverlapModel,
+    productionMonthly,
+    consumptionProfile,
+    s.lat,
+    s.pvgisManual,
+    s.batteryEnabled,
+    s.batteryKwh,
+    batteryParams,
+    consumptionYearByMonth,
+    consumptionPeakYearMatches,
   ])
 
   const snap = useMemo(
@@ -145,8 +325,9 @@ export function Calculator({ dark }: { dark: boolean }) {
         digitalMeter: s.digitalMeter,
         purchasePriceEurPerKwh: s.purchasePriceEurPerKwh,
         feedinTariffEurPerKwh: s.feedinTariffEurPerKwh,
+        peakCapacitySavingsEurAnnual,
       }),
-    [s, rows],
+    [s, rows, peakCapacitySavingsEurAnnual],
   )
 
   const { selfConsumedY, exportY } = rowsToAnnualTotals(rows)
@@ -160,6 +341,7 @@ export function Calculator({ dark }: { dark: boolean }) {
         purchasePriceEurPerKwh: s.purchasePriceEurPerKwh,
         feedinTariffEurPerKwh: s.feedinTariffEurPerKwh,
         systemKwp: snap.systemKwp,
+        peakCapacitySavingsEurAnnual,
         years: 25,
         discountRateAnnual: 0.03,
         panelDegradationAnnual: 0.005,
@@ -172,6 +354,7 @@ export function Calculator({ dark }: { dark: boolean }) {
       s.purchasePriceEurPerKwh,
       s.feedinTariffEurPerKwh,
       snap.systemKwp,
+      peakCapacitySavingsEurAnnual,
     ],
   )
 
@@ -198,6 +381,7 @@ export function Calculator({ dark }: { dark: boolean }) {
         purchasePriceEurPerKwh: s.purchasePriceEurPerKwh,
         feedinTariffEurPerKwh: s.feedinTariffEurPerKwh,
         systemKwp: snap.systemKwp,
+        peakCapacitySavingsEurAnnual,
         years: 25,
         discountRateAnnual: 0.03,
         panelDegradationAnnual: 0.005,
@@ -210,6 +394,7 @@ export function Calculator({ dark }: { dark: boolean }) {
       s.purchasePriceEurPerKwh,
       s.feedinTariffEurPerKwh,
       snap.systemKwp,
+      peakCapacitySavingsEurAnnual,
     ],
   )
 
@@ -257,6 +442,8 @@ export function Calculator({ dark }: { dark: boolean }) {
       ? `${formatNumber(snap.simplePaybackYears, 1, 1)} jaar`
       : '—'
 
+  const [tourOpen, setTourOpen] = useState(false)
+
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
       <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -268,7 +455,7 @@ export function Calculator({ dark }: { dark: boolean }) {
             Zonnepanelen ROI — PVGIS + eenvoudig verbruiks- en kostenmodel (Vlaanderen)
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           <button
             type="button"
             onClick={share}
@@ -283,12 +470,21 @@ export function Calculator({ dark }: { dark: boolean }) {
           >
             PDF-rapport
           </button>
+          <button
+            type="button"
+            onClick={() => setTourOpen(true)}
+            className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-800"
+          >
+            Rondleiding
+          </button>
         </div>
       </header>
 
+      <SolarSimTourDialog open={tourOpen} onClose={() => setTourOpen(false)} dark={dark} />
+
       <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
         <div className="space-y-6">
-          <LocationSearch />
+          <PvgisDataControls />
           <PVGISManualInput />
           <ConsumptionCsvUpload />
           <PeakPowerCsvUpload dark={dark} />
@@ -318,22 +514,22 @@ export function Calculator({ dark }: { dark: boolean }) {
               suffix="%"
             />
             <div className="rounded-lg bg-slate-100 px-3 py-2 text-sm text-slate-700 dark:bg-slate-800 dark:text-slate-200">
-              <span className="font-medium">Vermogen: </span>
-              <span className="tabular-nums">{formatNumber(systemKwp, 2, 2)} kWp</span>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="font-medium">Vermogen</span>
+                <span
+                  className="inline-flex h-4 w-4 shrink-0 cursor-help select-none items-center justify-center self-center rounded-full border border-slate-400 text-[0.6rem] font-serif font-bold leading-none text-slate-600 dark:border-slate-500 dark:text-slate-300"
+                  title="Dakhelling (panelen) voor de productiecurve: zie sectie PVGIS hierboven. Vermogen in kWp volgt uit dak en paneelrendement."
+                  role="img"
+                  aria-label="Dakhelling (panelen) voor de productiecurve: zie sectie PVGIS hierboven. Vermogen in kWp volgt uit dak en paneelrendement."
+                >
+                  i
+                </span>
+                <span className="text-slate-500">:</span>
+                <span className="tabular-nums text-slate-800 dark:text-slate-100">
+                  {formatNumber(systemKwp, 2, 2)} kWp
+                </span>
+              </div>
             </div>
-            {!s.pvgisManual ? (
-              <SliderInput
-                id="tilt"
-                label="Dakhelling"
-                min={10}
-                max={60}
-                step={1}
-                value={s.roofTiltDeg}
-                onChange={s.setRoofTiltDeg}
-                suffix="°"
-                hint="Wijzigen haalt nieuwe PVGIS-curve op."
-              />
-            ) : null}
             <SliderInput
               id="use"
               label="Jaarverbruik elektriciteit"
@@ -343,7 +539,7 @@ export function Calculator({ dark }: { dark: boolean }) {
               value={s.annualConsumptionKwh}
               onChange={s.setAnnualConsumptionKwh}
               suffix="kWh"
-              hint={
+              labelInfo={
                 importReferenceAnnualKwh != null
                   ? 'De som van je maandprofiel wordt gelijk gemaakt aan deze waarde (profiel blijft evenredig).'
                   : undefined
@@ -359,7 +555,9 @@ export function Calculator({ dark }: { dark: boolean }) {
                     <span className="text-slate-500 dark:text-slate-400">
                       {consumptionProfileSource === 'csv'
                         ? s.consumptionCsvFormat === 'fluvius-daily' && s.consumptionCsvSelectedYear
-                          ? ` — CSV (${s.consumptionCsvSelectedYear})`
+                          ? s.consumptionCsvUseMixedYears && s.consumptionCsvYearSecondary != null
+                            ? ` — CSV (${s.consumptionCsvSelectedYear} + ${s.consumptionCsvYearSecondary})`
+                            : ` — CSV (${s.consumptionCsvSelectedYear})`
                           : s.consumptionCsvFormat === 'quarterly'
                             ? ' — CSV (kwartalen)'
                             : ' — CSV'
@@ -393,37 +591,16 @@ export function Calculator({ dark }: { dark: boolean }) {
                 geschat met je <span className="font-semibold">uurlijke verbruiksprofiel</span>{' '}
                 (Fluvius-kwartierdata) en een zonnegolf per maand voor je locatie — dichter bij de
                 werkelijkheid dan alleen een vast percentage op maandbasis.
+                {s.batteryEnabled && s.batteryKwh > 0 ? (
+                  <>
+                    {' '}
+                    Met accu ({formatNumber(s.batteryKwh, 0, 1)} kWh nominaal, ≈{' '}
+                    {formatNumber(batteryUsableKwh, 0, 1)} kWh bruikbaar) wordt per uur een eenvoudige
+                    laad-/ontlaad-simulatie gebruikt i.p.v. een vast percentage.
+                  </>
+                ) : null}
               </div>
             ) : null}
-            <SliderInput
-              id="buy"
-              label="Aankoopprijs netstroom"
-              min={0.15}
-              max={0.6}
-              step={0.01}
-              value={s.purchasePriceEurPerKwh}
-              onChange={s.setPurchasePriceEurPerKwh}
-              suffix="€/kWh"
-            />
-            <div>
-              <SliderInput
-                id="feed"
-                label="Injectietarief (digitale meter)"
-                min={0}
-                max={0.15}
-                step={0.005}
-                value={s.feedinTariffEurPerKwh}
-                onChange={s.setFeedinTariffEurPerKwh}
-                suffix="€/kWh"
-              />
-              <p
-                className="mt-1 text-xs text-slate-500 dark:text-slate-400"
-                title="Fluvius netinjectietarief prosument (~€0,04/kWh). Analoge teller: volledige netbalans."
-              >
-                Tip: Fluvius prosumententarief voor digitale meter ≈ €0,04/kWh; analoge teller profiteert
-                van volledige netbalans.
-              </p>
-            </div>
 
             <fieldset className="space-y-2">
               <legend className="text-sm font-medium text-slate-700 dark:text-slate-200">
@@ -464,7 +641,7 @@ export function Calculator({ dark }: { dark: boolean }) {
               )}
             </fieldset>
 
-            <fieldset className="space-y-2">
+            <fieldset className="space-y-3">
               <legend className="text-sm font-medium text-slate-700 dark:text-slate-200">
                 Thuisbatterij
               </legend>
@@ -475,32 +652,147 @@ export function Calculator({ dark }: { dark: boolean }) {
                   onChange={(e) => s.setBatteryEnabled(e.target.checked)}
                   className="h-4 w-4 rounded border-slate-300 accent-amber-500"
                 />
-                Batterij meerekenen (zelfverbruik 70% → 90%)
+                Batterij meerekenen (zelfverbruik 70% → 90% zonder uurprofiel)
               </label>
               {s.batteryEnabled ? (
-                <SliderInput
-                  id="bat"
-                  label="Batterijcapaciteit"
-                  min={2}
-                  max={30}
-                  step={0.5}
-                  value={s.batteryKwh}
-                  onChange={s.setBatteryKwh}
-                  suffix="kWh"
-                />
+                <div className="space-y-3 border-t border-slate-200 pt-3 dark:border-slate-700">
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="battery-preset"
+                      className="text-sm font-medium text-slate-700 dark:text-slate-200"
+                    >
+                      Gangbare modellen (Vlaanderen / Benelux, richtwaarden)
+                    </label>
+                    <select
+                      id="battery-preset"
+                      value={s.batteryPresetId ?? ''}
+                      onChange={(e) => {
+                        const v = e.target.value
+                        if (v) {
+                          s.applyBatteryPreset(v)
+                        } else {
+                          s.setBatteryPresetId(null)
+                        }
+                      }}
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+                    >
+                      <option value="">Handmatig — sliders hieronder</option>
+                      {BATTERY_PRESETS.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.label}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Fabrikantgegevens wijzigen; pas de schuifregelaars aan na een keuze. Typische
+                      merken op de markt: Tesla Powerwall, BYD Battery-Box, Huawei LUNA, LG RESU,
+                      SolarEdge, Pylontech, Enphase (o.a. via installateurs).
+                    </p>
+                  </div>
+                  <SliderInput
+                    id="bat"
+                    label="Nominale capaciteit"
+                    min={2}
+                    max={30}
+                    step={0.5}
+                    value={s.batteryKwh}
+                    onChange={s.setBatteryKwh}
+                    suffix="kWh"
+                  />
+                  <p className="text-xs text-slate-600 dark:text-slate-400">
+                    Bruikbaar venster (na ondergrens SOC):{' '}
+                    <span className="font-medium tabular-nums">
+                      {formatNumber(batteryUsableKwh, 1, 2)} kWh
+                    </span>{' '}
+                    — rondtrip rendement (laad × ontlaad):{' '}
+                    <span className="font-medium tabular-nums">
+                      {formatNumber(batteryRoundtripEff * 100, 1, 1)}%
+                    </span>
+                  </p>
+                  <SliderInput
+                    id="bms"
+                    label="Minimum SOC (ondergrens)"
+                    min={0}
+                    max={20}
+                    step={0.5}
+                    value={s.batteryMinSocFrac * 100}
+                    onChange={(v) => s.setBatteryMinSocFrac(v / 100)}
+                    suffix="%"
+                  />
+                  <SliderInput
+                    id="bce"
+                    label="Laadrendement"
+                    min={88}
+                    max={99}
+                    step={0.5}
+                    value={s.batteryChargeEff * 100}
+                    onChange={(v) => s.setBatteryChargeEff(v / 100)}
+                    suffix="%"
+                  />
+                  <SliderInput
+                    id="bde"
+                    label="Ontlaadrendement"
+                    min={88}
+                    max={100}
+                    step={0.5}
+                    value={s.batteryDischargeEff * 100}
+                    onChange={(v) => s.setBatteryDischargeEff(v / 100)}
+                    suffix="%"
+                  />
+                  <SliderInput
+                    id="bmp"
+                    label="Max. laad/ontlaad vermogen"
+                    min={1}
+                    max={20}
+                    step={0.5}
+                    value={s.batteryMaxPowerKw}
+                    onChange={s.setBatteryMaxPowerKw}
+                    suffix="kW"
+                    hint="Per uur: max. kWh ≈ kW × 1 h (Powerwall 3 kan hoger)."
+                  />
+                  <SliderInput
+                    id="bad"
+                    label="Geschatte degradatie (capaciteit)"
+                    min={0}
+                    max={3.5}
+                    step={0.1}
+                    value={s.batteryAnnualDegradationPct}
+                    onChange={s.setBatteryAnnualDegradationPct}
+                    suffix="%/jaar"
+                    hint="Alleen informatief; jaarlijkse simulatie gebruikt jaar 0."
+                  />
+                  <SliderInput
+                    id="bwy"
+                    label="Garantie / levensduur (richtwaarde)"
+                    min={5}
+                    max={20}
+                    step={1}
+                    value={s.batteryWarrantyYears}
+                    onChange={s.setBatteryWarrantyYears}
+                    suffix="jaar"
+                  />
+                </div>
               ) : null}
             </fieldset>
           </section>
         </div>
 
         <div className="space-y-6">
-          {!s.pvgisManual && pvgisQuery.isError ? (
+          {!s.pvgisManual && !s.pvgisProductionLoaded && !pvgisQuery.isFetching ? (
+            <div className="rounded-xl border border-amber-200/80 bg-amber-50/90 p-4 text-sm text-amber-950 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-100">
+              <span className="font-medium">Voorbeeldcurve: </span>
+              tot je op <span className="font-medium">Laad opbrengst in app</span> klikt, gebruikt
+              de simulatie 900 kWh/kWp. Upload een PVGIS-bestand in de vorige sectie, of laad
+              via de knop.
+            </div>
+          ) : null}
+          {!s.pvgisManual && s.pvgisProductionLoaded && pvgisQuery.isError ? (
             <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/60 dark:text-red-200">
               PVGIS kon niet worden geladen (
               {pvgisQuery.error instanceof Error ? pvgisQuery.error.message : 'fout'}). Er wordt een
               voorbeeldcurve gebruikt — probeer later opnieuw of gebruik handmatige PVGIS-JSON hierboven.
             </div>
-          ) : !s.pvgisManual && pvgisQuery.isLoading ? (
+          ) : !s.pvgisManual && s.pvgisProductionLoaded && pvgisQuery.isLoading ? (
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
               PVGIS-gegevens laden…
             </div>
@@ -524,6 +816,18 @@ export function Calculator({ dark }: { dark: boolean }) {
             {formatEur(npv)} — investering{' '}
             <span className="tabular-nums">{formatEur(costTotal)}</span>
           </div>
+
+          {s.capacityTariffEurPerKwYear > 0 && s.peakPowerKwByMonth && peakCapacitySavingsEurAnnual > 0 ? (
+            <div className="rounded-xl border border-slate-200 bg-white/90 p-3 text-sm text-slate-600 shadow-sm dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300">
+              <span className="font-medium text-slate-800 dark:text-slate-100">
+                Besparing op capaciteitstarief:{' '}
+              </span>
+              <span className="tabular-nums font-medium text-emerald-800 dark:text-emerald-200">
+                {formatEur(peakCapacitySavingsEurAnnual)}
+              </span>
+              <span> /jaar</span>
+            </div>
+          ) : null}
 
           {warnings.exportHeavyDigital ? (
             <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100">
@@ -573,6 +877,7 @@ export function Calculator({ dark }: { dark: boolean }) {
                 <MonthlyChart
                   productionMonthly={productionMonthly}
                   selfConsumedMonthly={rows.map((r) => r.selfConsumedKwh)}
+                  selfConsumedNoBatteryMonthly={selfConsumedNoBatteryMonthly}
                   consumptionEven={consumptionEven}
                   consumptionProfile={consumptionProfile}
                   hasCustomConsumption={hasCustomConsumption}
@@ -600,6 +905,7 @@ export function Calculator({ dark }: { dark: boolean }) {
                   consumptionCsvDailyNacht={s.consumptionCsvDailyNacht}
                   consumptionCsvDateRange={s.consumptionCsvDateRange}
                   consumptionCsvSelectedYear={s.consumptionCsvSelectedYear}
+                  consumptionCsvYearByMonth={consumptionYearByMonth}
                   consumptionCsvFluviusGranularity={s.consumptionCsvFluviusGranularity}
                   dark={dark}
                 />
@@ -611,6 +917,38 @@ export function Calculator({ dark }: { dark: boolean }) {
             <h2 className="mb-2 text-lg font-semibold text-slate-900 dark:text-slate-50">
               Cumulatieve besparingen (25 jaar)
             </h2>
+            <div className="mb-6 space-y-4">
+              <SliderInput
+                id="buy"
+                label="Aankoopprijs netstroom"
+                min={0.15}
+                max={0.6}
+                step={0.01}
+                value={s.purchasePriceEurPerKwh}
+                onChange={s.setPurchasePriceEurPerKwh}
+                suffix="€/kWh"
+              />
+              <div>
+                <SliderInput
+                  id="feed"
+                  label="Injectietarief (digitale meter)"
+                  min={-0.2}
+                  max={0.15}
+                  step={0.005}
+                  value={s.feedinTariffEurPerKwh}
+                  onChange={s.setFeedinTariffEurPerKwh}
+                  suffix="€/kWh"
+                />
+                <p
+                  className="mt-1 text-xs text-slate-500 dark:text-slate-400"
+                  title="Negatief injectietarief: elke geëxporteerde kWh vermindert de besparing met |tarief|."
+                >
+                  Tip: richtwaarde Fluvius prosument o.a. ≈ €0,04/kWh. Negatief: what-if
+                  (export telt straf in de besparing). Met analoge teller: model zoals
+                  aankoopprijs/netbalans.
+                </p>
+              </div>
+            </div>
             <SavingsChart
               cumulativeSavings={cumulative}
               totalSystemCost={costTotal}

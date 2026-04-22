@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parsePvgisJsonText, parsePVGISResponse } from './pvgisParse'
+import { parsePvgisJsonText, parsePVGISResponse, parseUploadedPvgisFile } from './pvgisParse'
 import type { PVGISResponse } from '../types/pvgis'
 
 describe('parsePvgisJsonText', () => {
@@ -24,5 +24,13 @@ describe('parsePvgisJsonText', () => {
 
   it('rejects HTML', () => {
     expect(() => parsePvgisJsonText('<html></html>')).toThrow()
+  })
+})
+
+describe('parseUploadedPvgisFile', () => {
+  it('rejects Fluvius consumption CSV with a clear message', () => {
+    const csv = `Van (datum);Register;EAN-code
+01-01-2024;Afname Dag;123`
+    expect(() => parseUploadedPvgisFile(csv)).toThrow(/Fluvius|Verbruik/i)
   })
 })

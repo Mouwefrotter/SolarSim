@@ -8,7 +8,7 @@ const SUGGEST_DEBOUNCE_MS = 350
 const MIN_CHARS = 3
 const SUGGEST_LIMIT = 8
 
-export function LocationSearch() {
+export function LocationSearch({ embedded }: { embedded?: boolean }) {
   const { setLocation } = useCalculatorStore()
   const geocode = useGeocode()
   const [draft, setDraft] = useState('')
@@ -114,10 +114,8 @@ export function LocationSearch() {
     }
   }
 
-  return (
-    <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-700 dark:bg-slate-800/50">
-      <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Locatie</h3>
-      <form onSubmit={onSubmit} className="flex flex-col gap-2 sm:flex-row">
+  const form = (
+    <form onSubmit={onSubmit} className="flex flex-col gap-2 sm:flex-row">
         <div ref={wrapRef} className="relative min-w-0 flex-1">
           <input
             type="search"
@@ -160,11 +158,30 @@ export function LocationSearch() {
         <button
           type="submit"
           disabled={busy}
-          className="shrink-0 rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-slate-900 hover:bg-amber-400 disabled:opacity-60"
+          className="shrink-0 rounded-lg bg-amber-500 px-3 py-2 text-sm font-medium text-slate-900 hover:bg-amber-400 disabled:opacity-60"
         >
           {busy ? 'Zoeken…' : 'Zoek'}
         </button>
-      </form>
+    </form>
+  )
+
+  if (embedded) {
+    return (
+      <div className="space-y-2">
+        {form}
+        {geocode.error ? (
+          <p className="text-sm text-red-600 dark:text-red-400">
+            {(geocode.error as Error).message}
+          </p>
+        ) : null}
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-700 dark:bg-slate-800/50">
+      <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Locatie</h3>
+      {form}
       {geocode.error ? (
         <p className="text-sm text-red-600 dark:text-red-400">
           {(geocode.error as Error).message}

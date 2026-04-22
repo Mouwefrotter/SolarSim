@@ -6,15 +6,19 @@ function isRecord(x: unknown): x is Record<string, unknown> {
   return x !== null && typeof x === 'object' && !Array.isArray(x)
 }
 
-function ensureDayHours(map: Record<string, number[]>, key: string): number[] {
-  if (!map[key]) {
-    map[key] = Array(24).fill(0)
+/** PVGIS TMY/series: `20050101:1300` (uur), of `20050101:0010` (10 min; mm ≠ 0) */
+export function parsePvgisTmyTimestamp(t: string): { iso: string; hour: number } | null {
+  const f = parsePvgisTimeToIsoHourMinute(t)
+  if (!f) {
+    return null
   }
-  return map[key]!
+  return { iso: f.iso, hour: f.hour }
 }
 
-/** PVGIS TMY: `20050101:1300` */
-export function parsePvgisTmyTimestamp(t: string): { iso: string; hour: number } | null {
+/** Tijd- en datumkolom uit PVGIS CSV (uuroverslaande of 10-minutenreeksen). */
+export function parsePvgisTimeToIsoHourMinute(
+  t: string,
+): { iso: string; hour: number; minute: number } | null {
   const s = t.trim()
   const m = s.match(/^(\d{4})(\d{2})(\d{2}):(\d{2})(\d{2})$/)
   if (!m) {
@@ -24,6 +28,7 @@ export function parsePvgisTmyTimestamp(t: string): { iso: string; hour: number }
   const mo = Number(m[2])
   const d = Number(m[3])
   const hh = Number(m[4])
+  const minute = Number(m[5])
   const dt = new Date(y, mo - 1, d)
   if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) {
     return null
@@ -31,8 +36,49 @@ export function parsePvgisTmyTimestamp(t: string): { iso: string; hour: number }
   if (!Number.isFinite(hh) || hh < 0 || hh > 23) {
     return null
   }
+  if (!Number.isFinite(minute) || minute < 0 || minute > 59) {
+    return null
+  }
   const iso = `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`
-  return { iso, hour: hh }
+  return { iso, hour: hh, minute }
+}
+
+/**
+ * Verwijder HTML/comment (browser “Save as” op PVGIS) zodat dezelfde parser werkt
+ * als bij een rechtstreekse CSV van de API of curl.
+ */
+export function normalizeMangledPvgisBrowserExport(text: string): string {
+  const lines = text.split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    const clean = lines[i]!
+      .replace(/<!--[\s\S]*/, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\r/g, '')
+      .trim()
+    if (headerLooksLikePvgisTimeGxy(clean)) {
+      const rebuilt = [
+        ...lines
+          .slice(0, i)
+          .map((l) => l.replace(/<[^>]+>/g, ' ').replace(/<!--[^]*?-->/g, ' ').trim())
+          .filter((l) => l.length > 0),
+        ...lines.slice(i).map((l) => l.replace(/<[^>]+>/g, '').trim()).filter((l) => l.length > 0),
+      ]
+      return rebuilt.join('\n')
+    }
+  }
+  // Geen duidelijke kop: tags strippen (behoudt regels; kan genoeg zijn)
+  return lines
+    .map((l) => l.replace(/<[^>]+>/g, ' ').replace(/<!--[^]*?-->/g, ' ').trim())
+    .filter((l) => l.length > 0)
+    .join('\n')
+}
+
+function headerLooksLikePvgisTimeGxy(line: string): boolean {
+  const low = line.toLowerCase()
+  if (!low.includes('time') || !/[,;]/.test(line)) {
+    return false
+  }
+  return /g\s*\(\s*h\s*\)/i.test(line) || /g\s*\(\s*i\s*\)/i.test(line)
 }
 
 type IrradianceField = 'G(h)' | 'G(i)'
@@ -185,6 +231,9 @@ export function monthlyKwhPerKwpFromGhiDaily(
 }
 
 function splitCsvLine(line: string): string[] {
+  if ((line.match(/\t/g) ?? []).length >= 2) {
+    return line.split('\t').map((x) => x.trim())
+  }
   const sep = line.includes(';') ? ';' : ','
   return line.split(sep).map((x) => x.trim())
 }
@@ -208,39 +257,52 @@ function tryParseMetaLatLon(text: string): Partial<PvgisUploadedInputsMeta> {
   return meta
 }
 
+type GxyField = 'G(h)' | 'G(i)'
+
+interface DayIrradAgg {
+  sum: number[]
+  n: number[]
+}
+
 /**
- * PVGIS TMY-export als CSV (`time(UTC), T2m, … G(h), …`).
- * Synthetisch kalenderjaar → maandproductie uit stralingssommen.
+ * PVGIS TMY- of **seriescalc**-export (`time, G(i), …` of G(h), …` — ook na browser “Save as” met HTML).
+ * 10 minuten: meerdere stalen per uur → gemiddelde per uur. Multi-jaar → tmyMultiYear.
  */
 export function parsePvgisTmyCsv(text: string): ParsedPVGIS {
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+  const work = normalizeMangledPvgisBrowserExport(text)
+  const lines = work.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
   if (lines.length < 3) {
     throw new Error('TMY-CSV: bestand te kort.')
   }
 
   let headerIdx = -1
   for (let i = 0; i < lines.length; i++) {
-    const low = lines[i]!.toLowerCase()
-    if (low.includes('time') && (low.includes('g(h)') || low.includes('g('))) {
+    if (headerLooksLikePvgisTimeGxy(lines[i]!)) {
       headerIdx = i
       break
     }
   }
   if (headerIdx < 0) {
-    throw new Error('TMY-CSV: geen kopregel met time en G(h) gevonden.')
+    throw new Error('TMY-CSV: geen kopregel met time en G(h) of G(i) gevonden.')
   }
 
   const header = splitCsvLine(lines[headerIdx]!).map((c) => c.replace(/^["']|["']$/g, '').trim())
   const lower = header.map((h) => h.toLowerCase())
-  const iTime = lower.findIndex((h) => h.includes('time'))
+  const iTime = lower.findIndex((h) => h === 'time' || h.startsWith('time'))
   const iG = lower.findIndex(
-    (h) => h.replace(/\s/g, '') === 'g(h)' || h.includes('g(h)') || h.startsWith('g(h'),
+    (h) =>
+      h.replace(/\s/g, '') === 'g(h)' ||
+      h.includes('g(h)') ||
+      h.replace(/\s/g, '') === 'g(i)' ||
+      h.includes('g(i)'),
   )
   if (iTime < 0 || iG < 0) {
-    throw new Error('TMY-CSV: kolommen time en G(h) niet gevonden.')
+    throw new Error('TMY-CSV: kolommen time en G(h) of G(i) niet gevonden.')
   }
 
-  const daily: Record<string, number[]> = {}
+  const gField: GxyField = lower[iG]!.includes('g(i)') ? 'G(i)' : 'G(h)'
+
+  const aggr: Record<string, DayIrradAgg> = {}
   for (let r = headerIdx + 1; r < lines.length; r++) {
     const cells = splitCsvLine(lines[r]!)
     if (cells.length <= Math.max(iTime, iG)) {
@@ -248,16 +310,29 @@ export function parsePvgisTmyCsv(text: string): ParsedPVGIS {
     }
     const t = cells[iTime]!
     const gRaw = cells[iG]!
-    const gh = Number(String(gRaw).replace(',', '.'))
-    if (!Number.isFinite(gh)) {
+    const gVal = Number(String(gRaw).replace(',', '.'))
+    if (!Number.isFinite(gVal)) {
       continue
     }
-    const p = parsePvgisTmyTimestamp(t)
+    const p = parsePvgisTimeToIsoHourMinute(t)
     if (!p) {
       continue
     }
-    const hrow = ensureDayHours(daily, p.iso)
-    hrow[p.hour] = Math.max(0, gh)
+    if (!aggr[p.iso]) {
+      aggr[p.iso] = { sum: Array(24).fill(0), n: Array(24).fill(0) }
+    }
+    const a = aggr[p.iso]!
+    a.sum[p.hour] += Math.max(0, gVal)
+    a.n[p.hour] += 1
+  }
+
+  const daily: Record<string, number[]> = {}
+  for (const [iso, a] of Object.entries(aggr)) {
+    const hrow: number[] = Array(24).fill(0)
+    for (let h2 = 0; h2 < 24; h2++) {
+      hrow[h2] = a.n[h2]! > 0 ? a.sum[h2]! / a.n[h2]! : 0
+    }
+    daily[iso] = hrow
   }
 
   const dayKeys = Object.keys(daily).sort()
@@ -270,10 +345,12 @@ export function parsePvgisTmyCsv(text: string): ParsedPVGIS {
   const dMin = new Date(minDate + 'T12:00:00')
   const dMax = new Date(maxDate + 'T12:00:00')
   const fullCalendarYears = listFullCalendarYearsInRange(dMin, dMax)
-  const ty = Number(minDate.slice(0, 4))
+  const ty0 = Number(minDate.slice(0, 4))
+  const ty1 = Number(maxDate.slice(0, 4))
+  const multiYear = Number.isFinite(ty0) && Number.isFinite(ty1) && ty0 !== ty1
 
   const { monthlyEmKwhPerKwp, annualKwhPerKwp } = monthlyKwhPerKwpFromGhiDaily(daily)
-  const inputsPatch = tryParseMetaLatLon(text)
+  const inputsPatch = tryParseMetaLatLon(work)
   const inputsMeta: PvgisUploadedInputsMeta | undefined =
     inputsPatch.latitude !== undefined || inputsPatch.longitude !== undefined
       ? {
@@ -288,9 +365,9 @@ export function parsePvgisTmyCsv(text: string): ParsedPVGIS {
     inputsMeta,
     tmyGhiDailyHourly: daily,
     tmyRange: { min: minDate, max: maxDate },
-    tmyDataYear: Number.isFinite(ty) ? ty : null,
-    tmyIrradianceField: 'G(h)',
-    tmyMultiYear: false,
+    tmyDataYear: Number.isFinite(ty0) ? ty0 : null,
+    tmyIrradianceField: gField,
+    tmyMultiYear: multiYear,
     tmyFullCalendarYears: fullCalendarYears.length > 0 ? fullCalendarYears : undefined,
   }
 }

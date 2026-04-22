@@ -27,6 +27,8 @@ ChartJS.register(
 interface MonthlyChartProps {
   productionMonthly: number[]
   selfConsumedMonthly: number[]
+  /** Met accu: zelfverbruik zonder accu (uur- of factor­model), voor vergelijking in de grafiek */
+  selfConsumedNoBatteryMonthly?: number[] | null
   consumptionEven: number[]
   consumptionProfile: number[]
   hasCustomConsumption: boolean
@@ -39,6 +41,7 @@ interface MonthlyChartProps {
 export function MonthlyChart({
   productionMonthly,
   selfConsumedMonthly,
+  selfConsumedNoBatteryMonthly,
   consumptionEven,
   consumptionProfile,
   hasCustomConsumption,
@@ -46,6 +49,9 @@ export function MonthlyChart({
   showActualVersusEstimated,
   dark,
 }: MonthlyChartProps) {
+  const showBatteryBreakdown =
+    Array.isArray(selfConsumedNoBatteryMonthly) &&
+    selfConsumedNoBatteryMonthly.length === 12
   const grid = dark ? 'rgba(148,163,184,0.2)' : 'rgba(15,23,42,0.08)'
   const text = dark ? '#e2e8f0' : '#334155'
 
@@ -94,6 +100,36 @@ export function MonthlyChart({
     },
   }
 
+  const selfBarDatasets: ChartDataset<'bar' | 'line'>[] = showBatteryBreakdown
+    ? [
+        {
+          type: 'bar' as const,
+          label: 'Zelf verbruikt (zonder batterij)',
+          data: selfConsumedNoBatteryMonthly!,
+          backgroundColor: 'rgba(34, 197, 94, 0.65)',
+          borderRadius: 4,
+          order: 3,
+        },
+        {
+          type: 'bar' as const,
+          label: 'Zelf verbruikt (met batterij)',
+          data: selfConsumedMonthly,
+          backgroundColor: 'rgba(99, 102, 241, 0.72)',
+          borderRadius: 4,
+          order: 4,
+        },
+      ]
+    : [
+        {
+          type: 'bar' as const,
+          label: 'Zelf verbruikt (model)',
+          data: selfConsumedMonthly,
+          backgroundColor: 'rgba(34, 197, 94, 0.65)',
+          borderRadius: 4,
+          order: 3,
+        },
+      ]
+
   const datasets: ChartDataset<'bar' | 'line'>[] = [
     {
       type: 'bar',
@@ -103,14 +139,7 @@ export function MonthlyChart({
       borderRadius: 4,
       order: 2,
     },
-    {
-      type: 'bar',
-      label: 'Zelf verbruikt (model)',
-      data: selfConsumedMonthly,
-      backgroundColor: 'rgba(34, 197, 94, 0.65)',
-      borderRadius: 4,
-      order: 3,
-    },
+    ...selfBarDatasets,
     {
       type: 'line',
       label:

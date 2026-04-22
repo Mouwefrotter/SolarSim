@@ -8,8 +8,19 @@ interface CacheEntry {
   data: ParsedPVGIS
 }
 
-export function pvgisCacheKey(lat: number, lon: number, tiltDeg: number): string {
-  return `${PREFIX}${lat.toFixed(4)}:${lon.toFixed(4)}:${tiltDeg}`
+export interface PvgisCacheKeyParams {
+  lat: number
+  lon: number
+  tiltDeg: number
+  aspectDeg: number
+  systemLossPct: number
+  pvtech: string
+}
+
+export function pvgisCacheKey(p: PvgisCacheKeyParams): string {
+  return `${PREFIX}${p.lat.toFixed(4)}:${p.lon.toFixed(4)}:${p.tiltDeg.toFixed(1)}:${
+    p.aspectDeg
+  }:${p.systemLossPct.toFixed(0)}:${p.pvtech}`
 }
 
 export function loadParsedPVGIS(cacheKey: string): ParsedPVGIS | null {

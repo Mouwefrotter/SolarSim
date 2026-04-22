@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildFluviusMonthlyKwh,
   distinctYearsFromDaily,
   expandQuarterlyToMonthly,
   listFullCalendarYearsInRange,
   listSelectableYears,
   monthlyTotalsFromDaily,
+  monthlyTotalsFromDailyMixed,
   parseConsumptionCsv,
   parseVanTimeHour,
+  yearByMonthForTwoYearSplit,
 } from './csvConsumption'
 
 describe('parseConsumptionCsv simple12', () => {
@@ -135,5 +138,31 @@ describe('listSelectableYears', () => {
 
   it('falls back to min-max years when no full year', () => {
     expect(listSelectableYears([], '2023-04-01', '2023-09-01')).toEqual([2023])
+  })
+})
+
+describe('two-year Fluvius split', () => {
+  it('splits at October: jan–sep primary, okt–dec secondary', () => {
+    const y = yearByMonthForTwoYearSplit(2024, 2023, 10)
+    expect(y.slice(0, 9)).toEqual(Array(9).fill(2024))
+    expect(y.slice(9)).toEqual([2023, 2023, 2023])
+  })
+
+  it('monthlyTotalsFromDailyMixed uses calendar year per month', () => {
+    const daily: Record<string, number> = {
+      '2024-01-15': 31,
+      '2023-10-10': 100,
+    }
+    const ybm = yearByMonthForTwoYearSplit(2024, 2023, 10)
+    const m = monthlyTotalsFromDailyMixed(daily, ybm)
+    expect(m[0]).toBe(31)
+    expect(m[9]).toBe(100)
+  })
+
+  it('buildFluviusMonthlyKwh matches single-year when not mixed', () => {
+    const daily: Record<string, number> = { '2024-01-15': 10 }
+    const a = buildFluviusMonthlyKwh(daily, 2024, false, null, 10)
+    const b = monthlyTotalsFromDaily(daily, 2024)
+    expect(a).toEqual(b)
   })
 })

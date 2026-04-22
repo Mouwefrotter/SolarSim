@@ -136,6 +136,67 @@ export function monthlyTotalsFromDaily(daily: Record<string, number>, year: numb
   return months
 }
 
+/**
+ * 12 maandtotalen waarbij maand m (1–12) uit `yearByMonth[m-1]` komt (gemixte kalenderjaren).
+ */
+export function monthlyTotalsFromDailyMixed(
+  daily: Record<string, number>,
+  yearByMonth: readonly number[],
+): number[] {
+  if (yearByMonth.length !== 12) {
+    throw new Error('yearByMonth: verwacht 12 elementen')
+  }
+  const months = Array.from({ length: 12 }, () => 0)
+  for (const [iso, kwh] of Object.entries(daily)) {
+    const ys = Number(iso.slice(0, 4))
+    const ms = Number(iso.slice(5, 7))
+    if (!ms || ms < 1 || ms > 12) {
+      continue
+    }
+    const expectedY = yearByMonth[ms - 1]!
+    if (ys !== expectedY) {
+      continue
+    }
+    months[ms - 1] += kwh
+  }
+  return months
+}
+
+/**
+ * `firstMonthOfSecondary` (1–12): die maand en alles erna gebruikt `yearSecondary`, ervoor `yearPrimary`.
+ * Voorbeeld: 10 → jan–sep uit `yearPrimary`, okt–dec uit `yearSecondary`.
+ */
+export function yearByMonthForTwoYearSplit(
+  yearPrimary: number,
+  yearSecondary: number,
+  firstMonthOfSecondary: number,
+): number[] {
+  if (firstMonthOfSecondary < 1 || firstMonthOfSecondary > 12) {
+    throw new Error('firstMonthOfSecondary: 1..12')
+  }
+  return Array.from({ length: 12 }, (_, i) => {
+    const m = i + 1
+    return m >= firstMonthOfSecondary ? yearSecondary : yearPrimary
+  })
+}
+
+/**
+ * Maandtotalen (jan–dec) gegeven keuze één jaar of twee gescheiden kalenderjaren.
+ */
+export function buildFluviusMonthlyKwh(
+  daily: Record<string, number>,
+  yearPrimary: number,
+  useMixed: boolean,
+  yearSecondary: number | null,
+  firstMonthOfSecondary: number,
+): number[] {
+  if (useMixed && yearSecondary != null) {
+    const ybm = yearByMonthForTwoYearSplit(yearPrimary, yearSecondary, firstMonthOfSecondary)
+    return monthlyTotalsFromDailyMixed(daily, ybm)
+  }
+  return monthlyTotalsFromDaily(daily, yearPrimary)
+}
+
 function isFluviusDagtotalenHeader(line: string): boolean {
   const l = line.toLowerCase()
   return l.includes('van') && l.includes('datum') && l.includes('volume') && l.includes('register')

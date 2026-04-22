@@ -67,4 +67,19 @@ time(UTC),G(h)
     expect(p.tmyDataYear).toBe(2005)
     expect(p.inputsMeta?.latitude).toBeCloseTo(51, 5)
   })
+
+  it('accepts seriescalc G(i) after browser save (HTML) and 10-min timesteps', () => {
+    const csv = `<!-- saved from url -->
+<html><head></head><body>Latitude (decimal degrees):	50.858
+Longitude (decimal degrees):	4.702
+time,G(i),H_sun
+20050101:0010,10,0
+20050101:0020,20,0
+20050101:0030,30,0
+`
+    const p = parsePvgisTmyCsv(csv)
+    expect(p.tmyIrradianceField).toBe('G(i)')
+    const row = p.tmyGhiDailyHourly!['2005-01-01']!
+    expect(row[0]).toBeCloseTo(20, 5)
+  })
 })

@@ -37,6 +37,8 @@ interface DayHourlyChartProps {
   consumptionCsvDailyNacht: Record<string, number> | null
   consumptionCsvDateRange: { min: string; max: string } | null
   consumptionCsvSelectedYear: number | null
+  /** Per maand kalenderjaar bij mix van twee jaren; anders null */
+  consumptionCsvYearByMonth: number[] | null
   consumptionCsvFluviusGranularity: 'dag' | 'kwartier' | null
   dark: boolean
 }
@@ -56,13 +58,17 @@ export function DayHourlyChart({
   consumptionCsvDailyNacht,
   consumptionCsvDateRange,
   consumptionCsvSelectedYear,
+  consumptionCsvYearByMonth,
   consumptionCsvFluviusGranularity,
   dark,
 }: DayHourlyChartProps) {
   const chartId = useId()
   const [month0, setMonth0] = useState(() => new Date().getMonth())
 
-  const calendarYear = consumptionCsvSelectedYear ?? new Date().getFullYear()
+  const calendarYear =
+    (consumptionCsvYearByMonth && consumptionCsvYearByMonth[month0] != null
+      ? consumptionCsvYearByMonth[month0]
+      : consumptionCsvSelectedYear) ?? new Date().getFullYear()
   const month1 = month0 + 1
 
   const hasHourlyConsumption =
@@ -98,7 +104,10 @@ export function DayHourlyChart({
 
     const dh = hasHourlyConsumption ? consumptionCsvDailyHourly : null
     const range = consumptionCsvDateRange
-    const yr = consumptionCsvSelectedYear
+    const yr =
+      consumptionCsvYearByMonth && consumptionCsvYearByMonth[month0] != null
+        ? consumptionCsvYearByMonth[month0]
+        : consumptionCsvSelectedYear
 
     const consPrimary =
       hasDagNachtRegisters && consumptionCsvDailyDag && consumptionCsvDailyNacht && range && yr != null
@@ -155,6 +164,7 @@ export function DayHourlyChart({
     consumptionCsvDailyNacht,
     consumptionCsvDateRange,
     consumptionCsvSelectedYear,
+    consumptionCsvYearByMonth,
     hasHourlyConsumption,
     hasDagNachtRegisters,
   ])

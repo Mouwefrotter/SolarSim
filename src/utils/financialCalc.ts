@@ -5,6 +5,25 @@ export const BATTERY_COST_EUR_PER_KWH = 800
 export const INSTALL_FIXED_COST_EUR = 500
 export const PROSUMENT_EUR_PER_KWP_YEAR = 95
 
+/**
+ * Jaarlijkse besparing op capaciteitstarief t.o.v. geüploade piek, gegeven tarief €/kW piek / jaar.
+ */
+export function peakCapacitySavingsFromPeakDelta(input: {
+  capacityTariffEurPerKwYear: number
+  maxBaselinePeakKw: number
+  maxSimulatedPeakKw: number
+}): number {
+  const t = input.capacityTariffEurPerKwYear
+  if (!Number.isFinite(t) || t <= 0) {
+    return 0
+  }
+  const d = input.maxBaselinePeakKw - input.maxSimulatedPeakKw
+  if (!Number.isFinite(d) || d <= 0) {
+    return 0
+  }
+  return t * d
+}
+
 export function totalSystemCostEur(input: {
   systemKwp: number
   batteryEnabled: boolean
@@ -22,17 +41,28 @@ export function annualSavingsEur(input: {
   purchasePriceEurPerKwh: number
   feedinTariffEurPerKwh: number
   systemKwp: number
+  /** Optioneel: besparing op netpiek-capaciteit (€/jaar), o.a. uit piek-CSV vs simulatie */
+  peakCapacitySavingsEurAnnual?: number
 }): number {
-  const { rows, digitalMeter, purchasePriceEurPerKwh, feedinTariffEurPerKwh, systemKwp } = input
+  const {
+    rows,
+    digitalMeter,
+    purchasePriceEurPerKwh,
+    feedinTariffEurPerKwh,
+    systemKwp,
+    peakCapacitySavingsEurAnnual = 0,
+  } = input
   const { selfConsumedY, exportY, productionY } = rowsToAnnualTotals(rows)
 
   if (digitalMeter) {
     const energyPart =
       selfConsumedY * purchasePriceEurPerKwh + exportY * feedinTariffEurPerKwh
-    return energyPart - PROSUMENT_EUR_PER_KWP_YEAR * systemKwp
+    return (
+      energyPart - PROSUMENT_EUR_PER_KWP_YEAR * systemKwp + peakCapacitySavingsEurAnnual
+    )
   }
   /** Analogue net metering: all produced kWh valued at purchase price */
-  return productionY * purchasePriceEurPerKwh
+  return productionY * purchasePriceEurPerKwh + peakCapacitySavingsEurAnnual
 }
 
 export function simplePaybackYears(totalCostEur: number, annualSavingsEur: number): number {
@@ -49,6 +79,8 @@ export interface NpvInput {
   purchasePriceEurPerKwh: number
   feedinTariffEurPerKwh: number
   systemKwp: number
+  /** Optioneel: jaarlijkse besparing door lagere netafnamepiek (constant over jaren) */
+  peakCapacitySavingsEurAnnual?: number
   /** Years to project */
   years: number
   discountRateAnnual: number
@@ -70,6 +102,7 @@ export function yearlySavingsSeries(input: NpvInput): number[] {
     purchasePriceEurPerKwh,
     feedinTariffEurPerKwh,
     systemKwp,
+    peakCapacitySavingsEurAnnual = 0,
   } = input
 
   const deg = 1 - panelDegradationAnnual
@@ -86,9 +119,12 @@ export function yearlySavingsSeries(input: NpvInput): number[] {
       savings =
         year0SelfConsumedKwh * prodFactor * purchasePriceEurPerKwh * priceFactor +
         year0ExportKwh * prodFactor * feedinTariffEurPerKwh * priceFactor -
-        PROSUMENT_EUR_PER_KWP_YEAR * systemKwp
+        PROSUMENT_EUR_PER_KWP_YEAR * systemKwp +
+        peakCapacitySavingsEurAnnual
     } else {
-      savings = prod0 * prodFactor * purchasePriceEurPerKwh * priceFactor
+      savings =
+        prod0 * prodFactor * purchasePriceEurPerKwh * priceFactor +
+        peakCapacitySavingsEurAnnual
     }
     series.push(savings)
   }
@@ -147,6 +183,7 @@ export function fullFinancialSnapshot(input: {
   digitalMeter: boolean
   purchasePriceEurPerKwh: number
   feedinTariffEurPerKwh: number
+  peakCapacitySavingsEurAnnual?: number
 }) {
   const systemKwp = computeSystemKwp(input.roofAreaM2, input.panelEfficiencyPct)
   const cost = totalSystemCostEur({
@@ -160,6 +197,7 @@ export function fullFinancialSnapshot(input: {
     purchasePriceEurPerKwh: input.purchasePriceEurPerKwh,
     feedinTariffEurPerKwh: input.feedinTariffEurPerKwh,
     systemKwp,
+    peakCapacitySavingsEurAnnual: input.peakCapacitySavingsEurAnnual,
   })
   const { selfConsumedY, exportY, productionY } = rowsToAnnualTotals(input.rows)
   const npv = npv25YearDefault({
@@ -169,6 +207,7 @@ export function fullFinancialSnapshot(input: {
     purchasePriceEurPerKwh: input.purchasePriceEurPerKwh,
     feedinTariffEurPerKwh: input.feedinTariffEurPerKwh,
     systemKwp,
+    peakCapacitySavingsEurAnnual: input.peakCapacitySavingsEurAnnual,
     years: 25,
     discountRateAnnual: 0.03,
     panelDegradationAnnual: 0.005,

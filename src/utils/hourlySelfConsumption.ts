@@ -190,32 +190,203 @@ export function hourlyPanelShareFromPvgisGeometry(
   return raw.map((x) => x / s)
 }
 
+/** Standaard gedrag zoals vroeger: laadrendement 95%, geen vloer-SOC, geen ontlaadverlies, geen vermogenslimiet. */
+export const DEFAULT_BATTERY_SIM_LEGACY: BatterySimulationParams = {
+  minSocFrac: 0,
+  chargeEfficiency: 0.95,
+  dischargeEfficiency: 1,
+  maxPowerKw: Number.POSITIVE_INFINITY,
+}
+
+export interface BatterySimulationParams {
+  /** Ondergrens SOC als fractie van nominale kWh (0–0.25) */
+  minSocFrac: number
+  chargeEfficiency: number
+  dischargeEfficiency: number
+  /** Max laad- en ontlaad-energie per uur (kWh) — typisch ≈ kW × 1 h */
+  maxPowerKw: number
+}
+
+function clamp01(x: number): number {
+  return Math.min(1, Math.max(0, x))
+}
+
 /**
- * Zelfverbruek en injectie per maand via overlap tussen geschat uur-PV en gemeten uurverbruik
- * (Fluvius kwartierdata → uur).
- * Valt terug op null als er geen bruikbaar uurprofiel is.
+ * Eén gemiddelde dag (24 u): PV ph[h] en verbruik ch[h] in kWh/uur.
+ * SOC start op minimum (of 0); simuleert laden/ontladen binnen de dag.
  */
-export function computeMonthlyEnergyRowsFromHourlyProfile(input: {
+export function batteryDaySelfExportKwh(
+  ph: readonly number[],
+  ch: readonly number[],
+  batteryKwh: number,
+  params: Partial<BatterySimulationParams> = {},
+): { daySelfKwh: number; dayExportKwh: number } {
+  if (ph.length !== 24 || ch.length !== 24) {
+    throw new Error('batteryDaySelfExportKwh: verwacht 24 uurwaarden')
+  }
+  const merged: BatterySimulationParams = {
+    minSocFrac: params.minSocFrac ?? DEFAULT_BATTERY_SIM_LEGACY.minSocFrac,
+    chargeEfficiency: params.chargeEfficiency ?? DEFAULT_BATTERY_SIM_LEGACY.chargeEfficiency,
+    dischargeEfficiency:
+      params.dischargeEfficiency ?? DEFAULT_BATTERY_SIM_LEGACY.dischargeEfficiency,
+    maxPowerKw: params.maxPowerKw ?? DEFAULT_BATTERY_SIM_LEGACY.maxPowerKw,
+  }
+
+  const cap = Math.max(0, batteryKwh)
+  const minSocKwh = cap * clamp01(merged.minSocFrac)
+  const maxSocKwh = cap
+  const ηc = merged.chargeEfficiency
+  const ηd = merged.dischargeEfficiency
+  const pMax = merged.maxPowerKw
+
+  let soc = minSocKwh
+  let daySelf = 0
+  let dayExport = 0
+
+  for (let h = 0; h < 24; h++) {
+    const pv = Math.max(0, ph[h] ?? 0)
+    const ld = Math.max(0, ch[h] ?? 0)
+    const direct = Math.min(pv, ld)
+    daySelf += direct
+    let pvRem = pv - direct
+    let loadRem = ld - direct
+
+    if (loadRem > 0 && cap > 0) {
+      const socAvail = Math.max(0, soc - minSocKwh)
+      const maxDischargeToLoad = Math.min(
+        loadRem,
+        Number.isFinite(pMax) ? pMax : loadRem,
+        socAvail * ηd,
+      )
+      const dis = maxDischargeToLoad
+      daySelf += dis
+      soc -= dis / ηd
+      loadRem -= dis
+    }
+
+    if (pvRem > 0) {
+      if (cap > 0) {
+        const room = maxSocKwh - soc
+        const pvCap = Math.min(pvRem, Number.isFinite(pMax) ? pMax : pvRem)
+        const stored = Math.min(pvCap * ηc, room)
+        soc += stored
+        const pvElecToCharge = stored / ηc
+        dayExport += pvRem - pvElecToCharge
+      } else {
+        dayExport += pvRem
+      }
+    }
+  }
+
+  return { daySelfKwh: daySelf, dayExportKwh: dayExport }
+}
+
+/**
+ * Netafname per uur (kWh in dat uur ≈ kW gemiddeld) na PV-direct en batterijontlading.
+ * Geen laden van de accu vanaf het net in dit model.
+ */
+export function batteryDayHourlyGridImportKwh(
+  ph: readonly number[],
+  ch: readonly number[],
+  batteryKwh: number,
+  params: Partial<BatterySimulationParams> = {},
+): number[] {
+  if (ph.length !== 24 || ch.length !== 24) {
+    throw new Error('batteryDayHourlyGridImportKwh: verwacht 24 uurwaarden')
+  }
+  const merged: BatterySimulationParams = {
+    minSocFrac: params.minSocFrac ?? DEFAULT_BATTERY_SIM_LEGACY.minSocFrac,
+    chargeEfficiency: params.chargeEfficiency ?? DEFAULT_BATTERY_SIM_LEGACY.chargeEfficiency,
+    dischargeEfficiency:
+      params.dischargeEfficiency ?? DEFAULT_BATTERY_SIM_LEGACY.dischargeEfficiency,
+    maxPowerKw: params.maxPowerKw ?? DEFAULT_BATTERY_SIM_LEGACY.maxPowerKw,
+  }
+
+  const cap = Math.max(0, batteryKwh)
+  const minSocKwh = cap * clamp01(merged.minSocFrac)
+  const maxSocKwh = cap
+  const ηc = merged.chargeEfficiency
+  const ηd = merged.dischargeEfficiency
+  const pMax = merged.maxPowerKw
+
+  let soc = minSocKwh
+  const grid: number[] = Array(24).fill(0)
+
+  for (let h = 0; h < 24; h++) {
+    const pv = Math.max(0, ph[h] ?? 0)
+    const ld = Math.max(0, ch[h] ?? 0)
+    const direct = Math.min(pv, ld)
+    let pvRem = pv - direct
+    let loadRem = ld - direct
+
+    if (loadRem > 0 && cap > 0) {
+      const socAvail = Math.max(0, soc - minSocKwh)
+      const maxDischargeToLoad = Math.min(
+        loadRem,
+        Number.isFinite(pMax) ? pMax : loadRem,
+        socAvail * ηd,
+      )
+      const dis = maxDischargeToLoad
+      soc -= dis / ηd
+      loadRem -= dis
+    }
+
+    if (pvRem > 0) {
+      if (cap > 0) {
+        const room = maxSocKwh - soc
+        const pvCap = Math.min(pvRem, Number.isFinite(pMax) ? pMax : pvRem)
+        const stored = Math.min(pvCap * ηc, room)
+        soc += stored
+      }
+    }
+
+    grid[h] = Math.max(0, loadRem)
+  }
+
+  return grid
+}
+
+/** Netafname per uur zonder batterij: max(0, verbruik − PV). */
+export function dayHourlyGridImportKwhNoBattery(
+  ph: readonly number[],
+  ch: readonly number[],
+): number[] {
+  if (ph.length !== 24 || ch.length !== 24) {
+    throw new Error('dayHourlyGridImportKwhNoBattery: verwacht 24 uurwaarden')
+  }
+  return Array.from({ length: 24 }, (_, h) =>
+    Math.max(0, (ch[h] ?? 0) - (ph[h] ?? 0)),
+  )
+}
+
+/**
+ * Per kalendermaand: piek netafname (kW) op basis van één gemiddelde dag (zoals maand-simulatie).
+ * Vergelijkbaar met Fluvius maandpiek bij benadering.
+ */
+export function computeMonthlyPeakImportKwFromHourlyProfile(input: {
   monthlyProductionKwh: readonly number[]
   monthlyConsumptionKwh: readonly number[]
   dailyHourly: Record<string, number[]> | null
   year: number | null
+  /** 12 elementen: kalenderjaar per maand; overschrijft enkelvoudig `year` wanneer gezet */
+  yearByMonth?: number[] | null
   fileMin: string | null
   fileMax: string | null
   latDeg: number
-  /** zelfde betekenis als computeMonthlyEnergyRows: zonder batterij ~0.7, met batterij ~0.9 */
-  selfConsumptionRate: number
-  /** Optioneel: PVGIS TMY G(h) W/m²; dan PV-uurvorm uit meteo i.p.v. zonnestandmodel */
   pvgisTmyGhiDailyHourly?: Record<string, number[]> | null
   pvgisTmyRange?: { min: string; max: string } | null
   pvgisTmyDataYear?: number | null
-  /** Meerdere jaren in PVGIS-uurexport → gewichten over alle jaren per maand */
   pvgisTmyMultiYear?: boolean | null
-}): MonthlyEnergyRow[] | null {
+  batteryEnabled?: boolean
+  batteryKwh?: number
+  batteryParams?: Partial<BatterySimulationParams>
+}): number[] | null {
   const { monthlyProductionKwh, monthlyConsumptionKwh, dailyHourly, year, fileMin, fileMax } = input
+  const ybm = input.yearByMonth
+  const hasYbm = Boolean(ybm && ybm.length === 12)
   if (
     !dailyHourly ||
-    year === null ||
+    (!hasYbm && year === null) ||
     fileMin === null ||
     fileMax === null ||
     monthlyProductionKwh.length !== MONTHS ||
@@ -224,16 +395,23 @@ export function computeMonthlyEnergyRowsFromHourlyProfile(input: {
     return null
   }
 
-  const rows: MonthlyEnergyRow[] = []
+  const peaks: number[] = []
 
   for (let m = 0; m < MONTHS; m++) {
     const month1 = m + 1
-    const N = daysInCalendarMonth(year, month1)
+    const yForMonth = hasYbm ? ybm![m]! : year!
+    const N = daysInCalendarMonth(yForMonth, month1)
     if (N <= 0) {
       return null
     }
 
-    const avgHour = averageHourlyKwhForCalendarMonth(dailyHourly, year, month1, fileMin, fileMax)
+    const avgHour = averageHourlyKwhForCalendarMonth(
+      dailyHourly,
+      yForMonth,
+      month1,
+      fileMin,
+      fileMax,
+    )
     if (!avgHour) {
       return null
     }
@@ -250,10 +428,17 @@ export function computeMonthlyEnergyRowsFromHourlyProfile(input: {
       input.pvgisTmyRange &&
       (input.pvgisTmyMultiYear === true || input.pvgisTmyDataYear != null)
 
+    const tmyYearArg =
+      input.pvgisTmyMultiYear === true
+        ? null
+        : hasYbm
+          ? ybm![m]!
+          : input.pvgisTmyDataYear!
+
     let w = usePvgisTmyWeights
       ? hourlyWeightsFromHourlyPositiveSeries(
           input.pvgisTmyGhiDailyHourly!,
-          input.pvgisTmyMultiYear === true ? null : input.pvgisTmyDataYear!,
+          tmyYearArg,
           month1,
           input.pvgisTmyRange!.min,
           input.pvgisTmyRange!.max,
@@ -269,15 +454,156 @@ export function computeMonthlyEnergyRowsFromHourlyProfile(input: {
     const ph = w.map((wh) => Pday * wh)
     const ch = avgHour.map((ah) => (ah / sumAvg) * Cday)
 
-    let overlapDay = 0
+    const useBatterySim =
+      input.batteryEnabled === true &&
+      typeof input.batteryKwh === 'number' &&
+      input.batteryKwh > 0
+
+    const hourly = useBatterySim
+      ? batteryDayHourlyGridImportKwh(ph, ch, input.batteryKwh!, input.batteryParams)
+      : dayHourlyGridImportKwhNoBattery(ph, ch)
+
+    let maxH = 0
     for (let h = 0; h < 24; h++) {
-      overlapDay += Math.min(ph[h]!, ch[h]!)
+      if (hourly[h]! > maxH) {
+        maxH = hourly[h]!
+      }
     }
-    const overlapMonth = overlapDay * N
+    peaks.push(maxH)
+  }
+
+  return peaks
+}
+
+/**
+ * Zelfverbruek en injectie per maand via overlap tussen geschat uur-PV en gemeten uurverbruik
+ * (Fluvius kwartierdata → uur).
+ * Valt terug op null als er geen bruikbaar uurprofiel is.
+ * Met batterij + bruikbare capaciteit: uur-simulatie i.p.v. vaste factor 0.9.
+ */
+export function computeMonthlyEnergyRowsFromHourlyProfile(input: {
+  monthlyProductionKwh: readonly number[]
+  monthlyConsumptionKwh: readonly number[]
+  dailyHourly: Record<string, number[]> | null
+  year: number | null
+  yearByMonth?: number[] | null
+  fileMin: string | null
+  fileMax: string | null
+  latDeg: number
+  /** Zonder uur-batterijmodel: ~0.7 zonder accu, ~0.9 met accu (alleen als geen kWh-simulatie) */
+  selfConsumptionRate: number
+  /** Optioneel: PVGIS TMY G(h) W/m²; dan PV-uurvorm uit meteo i.p.v. zonnestandmodel */
+  pvgisTmyGhiDailyHourly?: Record<string, number[]> | null
+  pvgisTmyRange?: { min: string; max: string } | null
+  pvgisTmyDataYear?: number | null
+  /** Meerdere jaren in PVGIS-uurexport → gewichten over alle jaren per maand */
+  pvgisTmyMultiYear?: boolean | null
+  /** Uur-simulatie van laden/ontladen (alleen als kwartierdata aanwezig) */
+  batteryEnabled?: boolean
+  batteryKwh?: number
+  batteryParams?: Partial<BatterySimulationParams>
+}): MonthlyEnergyRow[] | null {
+  const { monthlyProductionKwh, monthlyConsumptionKwh, dailyHourly, year, fileMin, fileMax } = input
+  const ybm = input.yearByMonth
+  const hasYbm = Boolean(ybm && ybm.length === 12)
+  if (
+    !dailyHourly ||
+    (!hasYbm && year === null) ||
+    fileMin === null ||
+    fileMax === null ||
+    monthlyProductionKwh.length !== MONTHS ||
+    monthlyConsumptionKwh.length !== MONTHS
+  ) {
+    return null
+  }
+
+  const rows: MonthlyEnergyRow[] = []
+
+  for (let m = 0; m < MONTHS; m++) {
+    const month1 = m + 1
+    const yForMonth = hasYbm ? ybm![m]! : year!
+    const N = daysInCalendarMonth(yForMonth, month1)
+    if (N <= 0) {
+      return null
+    }
+
+    const avgHour = averageHourlyKwhForCalendarMonth(
+      dailyHourly,
+      yForMonth,
+      month1,
+      fileMin,
+      fileMax,
+    )
+    if (!avgHour) {
+      return null
+    }
+
+    const sumAvg = avgHour.reduce((a, b) => a + b, 0)
+    if (sumAvg <= 0) {
+      return null
+    }
+
+    const Pm = monthlyProductionKwh[m]!
+    const Cm = monthlyConsumptionKwh[m]!
+    const usePvgisTmyWeights =
+      input.pvgisTmyGhiDailyHourly &&
+      input.pvgisTmyRange &&
+      (input.pvgisTmyMultiYear === true || input.pvgisTmyDataYear != null)
+
+    const tmyYearArg =
+      input.pvgisTmyMultiYear === true
+        ? null
+        : hasYbm
+          ? ybm![m]!
+          : input.pvgisTmyDataYear!
+
+    let w = usePvgisTmyWeights
+      ? hourlyWeightsFromHourlyPositiveSeries(
+          input.pvgisTmyGhiDailyHourly!,
+          tmyYearArg,
+          month1,
+          input.pvgisTmyRange!.min,
+          input.pvgisTmyRange!.max,
+        )
+      : null
+    if (!w) {
+      w = hourlySolarShareForMonth(input.latDeg, m)
+    }
+
+    const Pday = Pm / N
+    const Cday = Cm / N
+
+    const ph = w.map((wh) => Pday * wh)
+    const ch = avgHour.map((ah) => (ah / sumAvg) * Cday)
 
     const cap = Math.min(Pm, Cm)
-    const selfConsumedKwh = Math.min(overlapMonth * input.selfConsumptionRate, cap)
-    const exportKwh = Math.max(0, Pm - selfConsumedKwh)
+
+    const useBatterySim =
+      input.batteryEnabled === true &&
+      typeof input.batteryKwh === 'number' &&
+      input.batteryKwh > 0
+
+    let selfConsumedKwh: number
+    let exportKwh: number
+
+    if (useBatterySim) {
+      const { daySelfKwh, dayExportKwh } = batteryDaySelfExportKwh(
+        ph,
+        ch,
+        input.batteryKwh!,
+        input.batteryParams,
+      )
+      selfConsumedKwh = Math.min(daySelfKwh * N, cap)
+      exportKwh = Math.max(0, dayExportKwh * N)
+    } else {
+      let overlapDay = 0
+      for (let h = 0; h < 24; h++) {
+        overlapDay += Math.min(ph[h]!, ch[h]!)
+      }
+      const overlapMonth = overlapDay * N
+      selfConsumedKwh = Math.min(overlapMonth * input.selfConsumptionRate, cap)
+      exportKwh = Math.max(0, Pm - selfConsumedKwh)
+    }
 
     rows.push({ productionKwh: Pm, consumptionKwh: Cm, selfConsumedKwh, exportKwh })
   }

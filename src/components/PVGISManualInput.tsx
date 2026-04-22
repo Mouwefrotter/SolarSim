@@ -38,7 +38,7 @@ export function PVGISManualInput() {
       <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
         PVGIS-data (handmatig)
       </h3>
-      <div className="mt-3 flex flex-wrap items-center gap-3">
+      <div className="mt-2 flex flex-wrap items-center gap-3">
         <input
           ref={fileInputRef}
           id={fileId}

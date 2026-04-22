@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   averageHourlyKwhForCalendarMonth,
+  batteryDayHourlyGridImportKwh,
+  batteryDaySelfExportKwh,
   computeMonthlyEnergyRowsFromHourlyProfile,
+  dayHourlyGridImportKwhNoBattery,
   hourlyPanelShareFromPvgisGeometry,
   hourlySolarShareForMonth,
   hourlyWeightsFromHourlyPositiveSeries,
@@ -79,6 +82,39 @@ function buildYear2023(
   }
   return o
 }
+
+describe('dayHourlyGridImportKwhNoBattery / batteryDayHourlyGridImportKwh', () => {
+  it('reduces grid import when battery discharges to evening load', () => {
+    const ph = Array(24).fill(0)
+    const ch = Array(24).fill(0)
+    ph[12] = 10
+    ch[18] = 10
+    const noBat = dayHourlyGridImportKwhNoBattery(ph, ch)
+    expect(Math.max(...noBat)).toBeCloseTo(10, 5)
+    const withBat = batteryDayHourlyGridImportKwh(ph, ch, 20, {
+      minSocFrac: 0,
+      chargeEfficiency: 1,
+      dischargeEfficiency: 1,
+      maxPowerKw: 50,
+    })
+    expect(Math.max(...withBat)).toBeCloseTo(0, 5)
+  })
+})
+
+describe('batteryDaySelfExportKwh', () => {
+  it('shifts surplus PV to later load when battery has capacity', () => {
+    const ph = Array(24).fill(0)
+    const ch = Array(24).fill(0)
+    ph[12] = 10
+    ch[18] = 10
+    const noBat = batteryDaySelfExportKwh(ph, ch, 0)
+    expect(noBat.daySelfKwh).toBe(0)
+    expect(noBat.dayExportKwh).toBe(10)
+    const withBat = batteryDaySelfExportKwh(ph, ch, 20)
+    expect(withBat.daySelfKwh).toBeCloseTo(9.5, 2)
+    expect(withBat.dayExportKwh).toBeCloseTo(0, 2)
+  })
+})
 
 describe('computeMonthlyEnergyRowsFromHourlyProfile', () => {
   it('gives lower annual self than flat month model when load is mainly at night', () => {

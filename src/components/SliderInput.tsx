@@ -8,6 +8,8 @@ interface SliderInputProps {
   onChange: (v: number) => void
   suffix?: string
   hint?: string
+  /** Korte uitleg naast het label (i), o.a. voor importprofielen */
+  labelInfo?: string
 }
 
 export function SliderInput({
@@ -20,12 +22,26 @@ export function SliderInput({
   onChange,
   suffix,
   hint,
+  labelInfo,
 }: SliderInputProps) {
   return (
     <div className="space-y-2">
       <div className="flex items-baseline justify-between gap-3">
-        <label htmlFor={id} className="text-sm font-medium text-slate-700 dark:text-slate-200">
-          {label}
+        <label
+          htmlFor={id}
+          className="inline-flex flex-wrap items-center gap-1.5 text-sm font-medium text-slate-700 dark:text-slate-200"
+        >
+          <span>{label}</span>
+          {labelInfo ? (
+            <span
+              className="inline-flex h-4 w-4 shrink-0 cursor-help select-none items-center justify-center rounded-full border border-slate-400 text-[0.6rem] font-serif font-bold leading-none text-slate-600 dark:border-slate-500 dark:text-slate-300"
+              title={labelInfo}
+              role="img"
+              aria-label={`Info: ${labelInfo}`}
+            >
+              i
+            </span>
+          ) : null}
         </label>
         <div className="flex items-center gap-1">
           <input

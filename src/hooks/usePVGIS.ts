@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import type { ParsedPVGIS } from '../types/pvgis'
 import { parsePvgisJsonText } from '../utils/pvgisParse'
-import { loadParsedPVGIS, pvgisCacheKey, saveParsedPVGIS } from '../utils/pvgisCache'
+import { loadParsedPVGIS, pvgisCacheKey, type PvgisCacheKeyParams, saveParsedPVGIS } from '../utils/pvgisCache'
 
 /**
  * Same-origin path served by Vite proxy (see vite.config) — avoids PVGIS CORS in the browser.
@@ -15,39 +15,55 @@ function pvgisBasePath(): string {
   return '/api/pvgis'
 }
 
-function buildUrl(lat: number, lon: number, tiltDeg: number): string {
-  const p = new URLSearchParams({
-    lat: String(lat),
-    lon: String(lon),
+export interface PvgisPvcalcRequestParams {
+  lat: number
+  lon: number
+  tiltDeg: number
+  aspectDeg: number
+  systemLossPct: number
+  pvtech: string
+}
+
+function buildPvcalcUrl(p: PvgisPvcalcRequestParams): string {
+  // Altijd 1 kWp: API levert E_m / E_y als kWh per kWp (aansluiting bij solarCalc).
+  const sp = new URLSearchParams({
+    lat: String(p.lat),
+    lon: String(p.lon),
     peakpower: '1',
-    loss: '14',
+    loss: String(p.systemLossPct),
     outputformat: 'json',
     mountingplace: 'building',
-    angle: String(tiltDeg),
-    aspect: '0',
-    pvtechchoice: 'crystSi',
+    angle: String(p.tiltDeg),
+    aspect: String(p.aspectDeg),
+    pvtechchoice: p.pvtech,
     components: '1',
   })
-  return `${pvgisBasePath()}/PVcalc?${p.toString()}`
+  return `${pvgisBasePath()}/PVcalc?${sp.toString()}`
 }
 
 export function usePVGIS(
-  lat: number,
-  lon: number,
-  tiltDeg: number,
+  params: PvgisPvcalcRequestParams,
   options?: { fetchEnabled?: boolean },
 ) {
   const fetchEnabled = options?.fetchEnabled !== false
-  const cacheKey = pvgisCacheKey(lat, lon, tiltDeg)
+  const keyParams: PvgisCacheKeyParams = {
+    lat: params.lat,
+    lon: params.lon,
+    tiltDeg: params.tiltDeg,
+    aspectDeg: params.aspectDeg,
+    systemLossPct: params.systemLossPct,
+    pvtech: params.pvtech,
+  }
+  const cacheKey = pvgisCacheKey(keyParams)
   return useQuery({
-    queryKey: ['pvgis', lat, lon, tiltDeg] as const,
+    queryKey: ['pvgis', keyParams] as const,
     enabled: fetchEnabled,
     queryFn: async (): Promise<ParsedPVGIS> => {
       const cached = loadParsedPVGIS(cacheKey)
       if (cached) {
         return cached
       }
-      const res = await fetch(buildUrl(lat, lon, tiltDeg))
+      const res = await fetch(buildPvcalcUrl(params))
       const bodyText = await res.text()
       if (!res.ok) {
         throw new Error(`PVGIS request failed (${res.status})`)
