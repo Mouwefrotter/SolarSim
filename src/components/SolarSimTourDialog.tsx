@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useState } from 'react'
 
 const STEPS: { title: string; body: string }[] = [
   {
@@ -27,11 +27,129 @@ const STEPS: { title: string; body: string }[] = [
   },
 ]
 
+const TOUR_TARGET_SELECTORS = [
+  '[data-tour="tour-welcome"]',
+  '[data-tour="tour-pvgis"]',
+  '[data-tour="tour-pvgis-export"]',
+  '[data-tour="tour-consumption"]',
+  '[data-tour="tour-peak-power"]',
+  '[data-tour="tour-capacity-tariff"]',
+] as const
+
+type Hole = { l: number; t: number; r: number; b: number; vw: number; vh: number }
+
+const PAD = 8
+
+function useTourTargetHole(open: boolean, step: number) {
+  const [hole, setHole] = useState<Hole | null>(null)
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setHole(null)
+      return
+    }
+    const sel = TOUR_TARGET_SELECTORS[step]
+    if (!sel) {
+      setHole(null)
+      return
+    }
+
+    const update = () => {
+      const el = document.querySelector(sel)
+      if (!el) {
+        setHole(null)
+        return
+      }
+      const r = el.getBoundingClientRect()
+      const l = r.left - PAD
+      const t = r.top - PAD
+      const rgt = r.right + PAD
+      const btm = r.bottom + PAD
+      setHole({
+        l: Math.max(0, l),
+        t: Math.max(0, t),
+        r: rgt,
+        b: btm,
+        vw: window.innerWidth,
+        vh: window.innerHeight,
+      })
+    }
+
+    const el = document.querySelector(sel)
+    el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    update()
+    const t0 = window.setTimeout(update, 450)
+    let innerRaf = 0
+    const raf0 = requestAnimationFrame(() => {
+      innerRaf = requestAnimationFrame(update)
+    })
+    window.addEventListener('scroll', update, true)
+    window.addEventListener('resize', update)
+    return () => {
+      window.clearTimeout(t0)
+      cancelAnimationFrame(raf0)
+      cancelAnimationFrame(innerRaf)
+      window.removeEventListener('scroll', update, true)
+      window.removeEventListener('resize', update)
+    }
+  }, [open, step])
+
+  return hole
+}
+
 type Props = { open: boolean; onClose: () => void; dark: boolean }
+
+function TourShade({ hole, onDimClick }: { hole: Hole; onDimClick: () => void }) {
+  const { l, t, r, b, vw, vh } = hole
+  const dim = 'bg-slate-900/50 dark:bg-slate-950/55'
+  const classBase = `absolute ${dim} cursor-default`
+
+  return (
+    <>
+      {t > 0 ? (
+        <button
+          type="button"
+          className={classBase}
+          style={{ left: 0, top: 0, width: vw, height: t }}
+          onClick={onDimClick}
+          aria-hidden
+        />
+      ) : null}
+      {l > 0 && b > t ? (
+        <button
+          type="button"
+          className={classBase}
+          style={{ left: 0, top: t, width: l, height: b - t }}
+          onClick={onDimClick}
+          aria-hidden
+        />
+      ) : null}
+      {r < vw && b > t ? (
+        <button
+          type="button"
+          className={classBase}
+          style={{ left: r, top: t, width: vw - r, height: b - t }}
+          onClick={onDimClick}
+          aria-hidden
+        />
+      ) : null}
+      {b < vh ? (
+        <button
+          type="button"
+          className={classBase}
+          style={{ left: 0, top: b, width: vw, height: vh - b }}
+          onClick={onDimClick}
+          aria-hidden
+        />
+      ) : null}
+    </>
+  )
+}
 
 export function SolarSimTourDialog({ open, onClose, dark }: Props) {
   const [step, setStep] = useState(0)
   const titleId = useId()
+  const hole = useTourTargetHole(open, step)
 
   useEffect(() => {
     if (open) {
@@ -66,14 +184,33 @@ export function SolarSimTourDialog({ open, onClose, dark }: Props) {
       aria-modal="true"
       aria-labelledby={titleId}
     >
-      <button
-        type="button"
-        className="absolute inset-0 bg-slate-900/50"
-        onClick={onClose}
-        aria-label="Sluiten"
-      />
+      {hole ? (
+        <>
+          <div className="fixed inset-0 z-[100]">
+            <TourShade hole={hole} onDimClick={onClose} />
+          </div>
+          <div
+            className="pointer-events-none fixed z-[102] ring-2 ring-amber-500/90 ring-offset-0 ring-offset-transparent dark:ring-amber-400/80"
+            style={{
+              left: hole.l,
+              top: hole.t,
+              width: Math.max(0, hole.r - hole.l),
+              height: Math.max(0, hole.b - hole.t),
+              borderRadius: 12,
+            }}
+            aria-hidden
+          />
+        </>
+      ) : (
+        <button
+          type="button"
+          className="absolute inset-0 z-[100] cursor-default bg-slate-900/50 dark:bg-slate-950/55"
+          onClick={onClose}
+          aria-label="Sluiten"
+        />
+      )}
       <div
-        className={`relative z-[101] w-full max-w-md rounded-2xl border p-5 shadow-xl ${
+        className={`relative z-[110] w-full max-w-md rounded-2xl border p-5 shadow-xl ${
           dark
             ? 'border-slate-600 bg-slate-900 text-slate-100'
             : 'border-slate-200 bg-white text-slate-900'

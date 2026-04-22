@@ -11,6 +11,7 @@ import { SolarSimTourDialog } from './SolarSimTourDialog'
 import { PVGISManualInput } from './PVGISManualInput'
 import { ConsumptionCsvUpload } from './ConsumptionCsvUpload'
 import { PeakPowerCsvUpload } from './PeakPowerCsvUpload'
+import type { MonthlyEnergyRow } from '../utils/solarCalc'
 import {
   computeMonthlyEnergyRows,
   computeSystemKwp,
@@ -27,14 +28,20 @@ import { yearByMonthForTwoYearSplit } from '../utils/csvConsumption'
 import { monthlyPeakKwForYear } from '../utils/peakPowerCsv'
 import { monthlyConsumptionKwh, estimatedEvenMonthly } from '../utils/consumptionProfile'
 import {
+  buildYearlySimulationTable,
   breakevenYear,
   cumulativeSavingsOverYears,
+  DEFAULT_ELECTRICITY_INF,
+  DEFAULT_PANEL_DEG,
   fullFinancialSnapshot,
   npv25YearDefault,
   peakCapacitySavingsFromPeakDelta,
+  splitSystemInvestmentEur,
   totalSystemCostEur,
   yearlySavingsSeries,
 } from '../utils/financialCalc'
+import { getBatteryPreset } from '../data/batteryPresets'
+import { PVGIS_PV_TECH_OPTIONS } from '../utils/pvgisLinks'
 import { formatEur, formatNumber } from '../utils/format'
 import { encodeCalculatorToSearchParams } from '../utils/urlState'
 import { downloadSolarSimPdf } from '../utils/pdfReport'
@@ -248,6 +255,58 @@ export function Calculator({ dark }: { dark: boolean }) {
     consumptionYearByMonth,
   ])
 
+  /** Volledig maandraster zónder thuisbatterij (0,7- of uur-sim) — t.o.v. zelfde profiel met accu. */
+  const noBatteryRows = useMemo((): MonthlyEnergyRow[] => {
+    const range = s.consumptionCsvDateRange
+    const yr = s.consumptionCsvSelectedYear
+    const dh = s.consumptionCsvDailyHourly
+    if (
+      dh &&
+      range &&
+      yr != null &&
+      s.consumptionCsvFluviusGranularity === 'kwartier'
+    ) {
+      const hourlyBase = {
+        monthlyProductionKwh: productionMonthly,
+        monthlyConsumptionKwh: consumptionProfile,
+        dailyHourly: dh,
+        year: yr,
+        yearByMonth: consumptionYearByMonth,
+        fileMin: range.min,
+        fileMax: range.max,
+        latDeg: s.lat,
+        pvgisTmyGhiDailyHourly: s.pvgisManual?.tmyGhiDailyHourly ?? null,
+        pvgisTmyRange: s.pvgisManual?.tmyRange ?? null,
+        pvgisTmyDataYear: s.pvgisManual?.tmyDataYear ?? null,
+        pvgisTmyMultiYear: s.pvgisManual?.tmyMultiYear ?? false,
+      } as const
+      const fromHourly = computeMonthlyEnergyRowsFromHourlyProfile({
+        ...hourlyBase,
+        selfConsumptionRate: 0.7,
+        batteryEnabled: false,
+        batteryParams: undefined,
+      })
+      if (fromHourly) {
+        return fromHourly
+      }
+    }
+    return computeMonthlyEnergyRows({
+      monthlyProductionKwh: productionMonthly,
+      monthlyConsumptionKwh: consumptionProfile,
+      selfConsumptionRate: 0.7,
+    })
+  }, [
+    productionMonthly,
+    consumptionProfile,
+    s.consumptionCsvDailyHourly,
+    s.consumptionCsvDateRange,
+    s.consumptionCsvSelectedYear,
+    s.consumptionCsvFluviusGranularity,
+    s.lat,
+    s.pvgisManual,
+    consumptionYearByMonth,
+  ])
+
   const peakCapacitySavingsEurAnnual = useMemo(() => {
     if (
       s.capacityTariffEurPerKwYear <= 0 ||
@@ -425,17 +484,92 @@ export function Calculator({ dark }: { dark: boolean }) {
   }, [])
 
   const pdf = useCallback(() => {
+    const wT = rowsToAnnualTotals(rows)
+    const nT = rowsToAnnualTotals(noBatteryRows)
+    const inv = splitSystemInvestmentEur({
+      systemKwp: snap.systemKwp,
+      batteryEnabled: s.batteryEnabled,
+      batteryKwh: s.batteryKwh,
+    })
+    const yearlyTable = buildYearlySimulationTable({
+      year0SelfNoBattKwh: nT.selfConsumedY,
+      year0SelfWithBattKwh: wT.selfConsumedY,
+      year0ExportNoBattKwh: nT.exportY,
+      year0ExportWithBattKwh: wT.exportY,
+      year0ProductionKwh: wT.productionY,
+      basePurchaseEurPerKwh: s.purchasePriceEurPerKwh,
+      baseFeedinEurPerKwh: s.feedinTariffEurPerKwh,
+      maxYear: 25,
+      panelDegradationAnnual: DEFAULT_PANEL_DEG,
+      electricityInflationAnnual: DEFAULT_ELECTRICITY_INF,
+    })
+    const pvLabel =
+      PVGIS_PV_TECH_OPTIONS.find((o) => o.value === s.pvgisPvtechChoice)?.label ??
+      s.pvgisPvtechChoice
+    const preset = s.batteryPresetId ? getBatteryPreset(s.batteryPresetId) : undefined
     downloadSolarSimPdf({
       title: 'SolarSim Belgium — rapport',
       locationLabel: s.locationLabel,
-      systemKwp: snap.systemKwp,
-      annualProductionKwh: snap.annualProductionKwh,
-      annualSavingsEur: snap.annualSavingsEur,
+      lat: s.lat,
+      lon: s.lon,
       paybackYears: snap.simplePaybackYears,
       npv25Eur: npv,
       totalCostEur: costTotal,
+      annualSavingsEur: snap.annualSavingsEur,
+      digitalMeter: s.digitalMeter,
+      pvgis: {
+        roofTiltDeg: s.roofTiltDeg,
+        panelAzimuthDeg: s.pvgisPanelAzimuthDeg,
+        peakPowerKwp: s.pvgisPeakPowerKw,
+        systemLossPct: s.pvgisSystemLossPct,
+        pvtechLabel: pvLabel,
+      },
+      install: {
+        roofAreaM2: s.roofAreaM2,
+        panelEfficiencyPct: s.panelEfficiencyPct,
+        systemKwp: snap.systemKwp,
+      },
+      investment: {
+        panelsAndInverterEur: inv.panelsAndInverterEur,
+        fixedInstallEur: inv.fixedInstallEur,
+        batteryEur: inv.batteryEur,
+      },
+      battery: s.batteryEnabled
+        ? {
+            enabled: true,
+            nominalKwh: s.batteryKwh,
+            presetLabel: preset?.label ?? null,
+            minSocFrac: s.batteryMinSocFrac,
+            chargeEff: s.batteryChargeEff,
+            dischargeEff: s.batteryDischargeEff,
+            maxPowerKw: s.batteryMaxPowerKw,
+            annualDegradationPct: s.batteryAnnualDegradationPct,
+            warrantyYears: s.batteryWarrantyYears,
+          }
+        : null,
+      annualConsumptionKwh: s.annualConsumptionKwh,
+      productionMonthly,
+      consumptionProfileMonthly: consumptionProfile,
+      withBatterySelfMonthly: rows.map((r) => r.selfConsumedKwh),
+      noBatterySelfMonthly: noBatteryRows.map((r) => r.selfConsumedKwh),
+      withBatteryExportMonthly: rows.map((r) => r.exportKwh),
+      noBatteryExportMonthly: noBatteryRows.map((r) => r.exportKwh),
+      tariffs: {
+        purchaseEurPerKwh: s.purchasePriceEurPerKwh,
+        feedinEurPerKwh: s.feedinTariffEurPerKwh,
+      },
+      yearlyTable,
     })
-  }, [s.locationLabel, snap, npv, costTotal])
+  }, [
+    rows,
+    noBatteryRows,
+    snap,
+    s,
+    npv,
+    costTotal,
+    productionMonthly,
+    consumptionProfile,
+  ])
 
   const paybackLabel =
     Number.isFinite(snap.simplePaybackYears) && snap.simplePaybackYears < 1e6
@@ -446,46 +580,47 @@ export function Calculator({ dark }: { dark: boolean }) {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
-      <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-slate-50">
-            SolarSim Belgium
-          </h1>
-          <p className="mt-1 text-slate-600 dark:text-slate-300">
-            Zonnepanelen ROI — PVGIS + eenvoudig verbruiks- en kostenmodel (Vlaanderen)
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          <button
-            type="button"
-            onClick={share}
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-800"
-          >
-            Link delen
-          </button>
-          <button
-            type="button"
-            onClick={pdf}
-            className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-slate-900 hover:bg-amber-400"
-          >
-            PDF-rapport
-          </button>
-          <button
-            type="button"
-            onClick={() => setTourOpen(true)}
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-800"
-          >
-            Rondleiding
-          </button>
-        </div>
-      </header>
+      <div data-tour="tour-welcome" className="space-y-8">
+        <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-slate-50">
+              SolarSim Belgium
+            </h1>
+            <p className="mt-1 text-slate-600 dark:text-slate-300">
+              Zonnepanelen ROI — PVGIS + eenvoudig verbruiks- en kostenmodel (Vlaanderen)
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={share}
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-800"
+            >
+              Link delen
+            </button>
+            <button
+              type="button"
+              onClick={pdf}
+              className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-slate-900 hover:bg-amber-400"
+            >
+              PDF-rapport
+            </button>
+            <button
+              type="button"
+              onClick={() => setTourOpen(true)}
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-800"
+            >
+              Rondleiding
+            </button>
+          </div>
+        </header>
 
-      <SolarSimTourDialog open={tourOpen} onClose={() => setTourOpen(false)} dark={dark} />
-
-      <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
+        <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
         <div className="space-y-6">
-          <PvgisDataControls />
-          <PVGISManualInput />
+          <div className="space-y-6" data-tour="tour-pvgis">
+            <PvgisDataControls />
+            <PVGISManualInput />
+          </div>
           <ConsumptionCsvUpload />
           <PeakPowerCsvUpload dark={dark} />
 
@@ -959,5 +1094,7 @@ export function Calculator({ dark }: { dark: boolean }) {
         </div>
       </div>
     </div>
+    <SolarSimTourDialog open={tourOpen} onClose={() => setTourOpen(false)} dark={dark} />
+  </div>
   )
 }

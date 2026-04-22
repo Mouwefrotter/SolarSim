@@ -130,7 +130,10 @@ export function ConsumptionCsvUpload() {
       : null
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-700 dark:bg-slate-800/50">
+    <div
+      className="rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-700 dark:bg-slate-800/50"
+      data-tour="tour-consumption"
+    >
       <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
         Verbruik (kwartier of dagtotaal Fluvius)
       </h3>

@@ -176,7 +176,10 @@ export function PvgisDataControls() {
         </select>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 text-sm">
+      <div
+        className="flex flex-wrap items-center gap-2 text-sm"
+        data-tour="tour-pvgis-export"
+      >
         <a
           href={seriesCsvUrl}
           target="_blank"

@@ -223,3 +223,105 @@ export function fullFinancialSnapshot(input: {
     npv25Eur: npv,
   }
 }
+
+export const DEFAULT_PANEL_DEG = 0.005
+export const DEFAULT_ELECTRICITY_INF = 0.02
+
+export function splitSystemInvestmentEur(input: {
+  systemKwp: number
+  batteryEnabled: boolean
+  batteryKwh: number
+}): { panelsAndInverterEur: number; fixedInstallEur: number; batteryEur: number; totalEur: number } {
+  const { systemKwp, batteryEnabled, batteryKwh } = input
+  const panelsAndInverterEur = systemKwp * PANEL_COST_EUR_PER_KWP
+  const fixedInstallEur = INSTALL_FIXED_COST_EUR
+  const batteryEur = batteryEnabled ? batteryKwh * BATTERY_COST_EUR_PER_KWH : 0
+  return {
+    panelsAndInverterEur,
+    fixedInstallEur,
+    batteryEur,
+    totalEur: panelsAndInverterEur + fixedInstallEur + batteryEur,
+  }
+}
+
+/**
+ * Rij 0 = investeringsjaar; rijen 1..maxYear = opbrengst/verbruik t.o.v. jaar 0, metzelfde degradatie- en
+ * prijsinflatie-annulering als in {@link yearlySavingsSeries} (NpvInput).
+ */
+export function buildYearlySimulationTable(input: {
+  year0SelfNoBattKwh: number
+  year0SelfWithBattKwh: number
+  year0ExportNoBattKwh: number
+  year0ExportWithBattKwh: number
+  year0ProductionKwh: number
+  basePurchaseEurPerKwh: number
+  baseFeedinEurPerKwh: number
+  maxYear: number
+  panelDegradationAnnual: number
+  electricityInflationAnnual: number
+}): Array<{
+  year: number
+  productionKwh: number
+  selfNoBattKwh: number
+  selfWithBattKwh: number
+  exportNoBattKwh: number
+  exportWithBattKwh: number
+  purchaseEurPerKwh: number
+  feedinEurPerKwh: number
+}> {
+  const {
+    year0SelfNoBattKwh,
+    year0SelfWithBattKwh,
+    year0ExportNoBattKwh,
+    year0ExportWithBattKwh,
+    year0ProductionKwh,
+    basePurchaseEurPerKwh,
+    baseFeedinEurPerKwh,
+    maxYear,
+    panelDegradationAnnual,
+    electricityInflationAnnual,
+  } = input
+
+  const deg = 1 - panelDegradationAnnual
+  const inf = 1 + electricityInflationAnnual
+  const out: Array<{
+    year: number
+    productionKwh: number
+    selfNoBattKwh: number
+    selfWithBattKwh: number
+    exportNoBattKwh: number
+    exportWithBattKwh: number
+    purchaseEurPerKwh: number
+    feedinEurPerKwh: number
+  }> = []
+
+  for (let y = 0; y <= maxYear; y++) {
+    if (y === 0) {
+      out.push({
+        year: 0,
+        productionKwh: 0,
+        selfNoBattKwh: 0,
+        selfWithBattKwh: 0,
+        exportNoBattKwh: 0,
+        exportWithBattKwh: 0,
+        purchaseEurPerKwh: basePurchaseEurPerKwh,
+        feedinEurPerKwh: baseFeedinEurPerKwh,
+      })
+    } else {
+      const age = y - 1
+      const prodFactor = deg ** age
+      const priceFactor = inf ** age
+      out.push({
+        year: y,
+        productionKwh: year0ProductionKwh * prodFactor,
+        selfNoBattKwh: year0SelfNoBattKwh * prodFactor,
+        selfWithBattKwh: year0SelfWithBattKwh * prodFactor,
+        exportNoBattKwh: year0ExportNoBattKwh * prodFactor,
+        exportWithBattKwh: year0ExportWithBattKwh * prodFactor,
+        purchaseEurPerKwh: basePurchaseEurPerKwh * priceFactor,
+        feedinEurPerKwh: baseFeedinEurPerKwh * priceFactor,
+      })
+    }
+  }
+  return out
+}

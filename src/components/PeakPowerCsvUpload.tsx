@@ -83,9 +83,10 @@ export function PeakPowerCsvUpload({ dark }: { dark: boolean }) {
 
   return (
     <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-700 dark:bg-slate-800/50">
-      <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Piekvermogen</h3>
+      <div data-tour="tour-peak-power">
+        <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Piekvermogen</h3>
 
-      <div className="mt-2 flex flex-wrap items-center gap-3">
+        <div className="mt-2 flex flex-wrap items-center gap-3">
         <input
           ref={fileInputRef}
           id={fileId}
@@ -131,13 +132,17 @@ export function PeakPowerCsvUpload({ dark }: { dark: boolean }) {
         ) : null}
       </div>
 
-      {monthlySeries && chartYear != null ? (
-        <div className="mt-4">
-          <PeakPowerMonthlyChart monthlyPeakKw={monthlySeries} dark={dark} />
-        </div>
-      ) : null}
+        {monthlySeries && chartYear != null ? (
+          <div className="mt-4">
+            <PeakPowerMonthlyChart monthlyPeakKw={monthlySeries} dark={dark} />
+          </div>
+        ) : null}
+      </div>
 
-      <div className="mt-4 border-t border-slate-200 pt-4 dark:border-slate-600">
+      <div
+        className="mt-4 border-t border-slate-200 pt-4 dark:border-slate-600"
+        data-tour="tour-capacity-tariff"
+      >
         <SliderInput
           id="cap-tariff"
           label="Capaciteitstarief (afnamepiek)"
